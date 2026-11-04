@@ -1,0 +1,276 @@
+import { Fragment } from 'react';
+import { availableToPlay, isPlayableKind } from '@machafoundation/core';
+import { Link } from 'react-router-dom';
+import type { MediaApi } from '@machafoundation/core';
+import { routes } from '@machafoundation/core';
+import { albumLabel, cardSubtitle, episodeLabel, seasonLabel, seriesPlaceText, trackNumberLabel } from '../text/viewerText';
+import type { MediaSummary } from '@machafoundation/core';
+import { AvailabilityMarker, openControlProps } from './Availability';
+import { CardCloseButton } from './CardCloseButton';
+import { LazyArtwork } from './LazyArtwork';
+import { OverflowMenu, type OverflowMenuAction } from './OverflowMenu';
+
+export interface MediaCardAction {
+  label: string;
+  onSelect: (item: MediaSummary) => void;
+  disabled?: boolean;
+  destructive?: boolean;
+}
+
+interface Props {
+  api: MediaApi;
+  item: MediaSummary;
+  onOpen: (item: MediaSummary) => void;
+  onRemoveFromContinueWatching?: (item: MediaSummary) => void;
+  actions?: readonly MediaCardAction[];
+  progress?: number;
+  /** `in-context` names an episode's series and season, or a track's artist and album, for a list that is neither's. */
+  variant?: 'default' | 'continue-watching' | 'in-context';
+  /** The second line, in place of the kind's own: a book's place on a series page. */
+  subtitle?: string;
+  elementRef?: (element: HTMLButtonElement | null) => void;
+}
+
+function artworkClass(item: MediaSummary): string {
+  return item.kind === 'album' || item.kind === 'artist' || item.kind === 'track' ? 'poster music-artwork' : 'poster';
+}
+
+function Poster({ api, item, progress }: Pick<Props, 'api' | 'item' | 'progress'>) {
+  return (
+    <div className={artworkClass(item)}>
+      <LazyArtwork
+        api={api}
+        artwork={item.artwork?.poster ?? item.artwork?.thumbnail}
+        alt={item.title}
+        placeholder={<div className="poster-placeholder">{item.title.slice(0, 1)}</div>}
+      />
+      {progress !== undefined && progress > 0 && (
+        <div className="progress-track"><div className="progress-value" style={{ width: `${Math.min(100, progress * 100)}%` }} /></div>
+      )}
+      <AvailabilityMarker availability={item.availability} members={item.availabilityMembers} kind={item.kind} />
+    </div>
+  );
+}
+
+function cardClass(item: MediaSummary, extra = ''): string {
+  return `media-card media-card-${item.kind}${extra}${!availableToPlay(item) ? ' is-unavailable' : ''}`;
+}
+
+function actionItems(item: MediaSummary, actions: readonly MediaCardAction[]): OverflowMenuAction[] {
+  return actions.map((action) => ({
+    label: action.label,
+    disabled: action.disabled,
+    destructive: action.destructive,
+    onSelect: () => action.onSelect(item),
+  }));
+}
+
+type ContextLink = { to: string; label: string };
+
+/**
+ * An item's parents as links, one line per entry: an episode's series, then
+ * its season mark; a track's artist and album together; a book's authors,
+ * then its series with its place in each.
+ */
+function contextLines(item: MediaSummary): ContextLink[][] | undefined {
+  if (item.kind === 'episode' && item.playbackContext) {
+    const { series, season } = item.playbackContext;
+    return [
+      [{ to: routes.show(series.id), label: series.title }],
+      [{ to: routes.season(series.id, season.id), label: episodeLabel(item) ?? (season.title || seasonLabel(season.seasonNumber) || series.title) }],
+    ];
+  }
+  if (item.kind === 'track' && item.musicContext) {
+    const { artist, album } = item.musicContext;
+    return [[
+      ...(artist ? [{ to: routes.artist(artist.id), label: artist.title }] : []),
+      { to: routes.album(album.id), label: albumLabel(item.musicContext) },
+    ]];
+  }
+  if (item.kind === 'book' && item.bookContext) {
+    const authors = item.bookContext.authors.filter((author) => author.title).map((author) => ({ to: routes.bookAuthor(author.id), label: author.title as string }));
+    const series = item.bookContext.series.filter((entry) => entry.title).map((entry) => ({
+      to: routes.bookSeries(entry.id),
+      label: seriesPlaceText(entry.title as string, entry.index),
+    }));
+    const lines = [authors, series].filter((line) => line.length > 0);
+    return lines.length > 0 ? lines : undefined;
+  }
+  return undefined;
+}
+
+/** What opening a card does, for its label: a book is read, not played. */
+function openVerb(item: MediaSummary): string {
+  return isPlayableKind(item.kind) ? 'Play' : 'Open';
+}
+
+function ContextLinks({ lines }: { lines: ReadonlyArray<ReadonlyArray<ContextLink>> }) {
+  return (
+    <div className="continue-card-context">
+      {lines.map((line) => (
+        <span key={line.map((link) => link.to).join(' ')} className="continue-card-context-line">
+          {line.map((link, index) => (
+            <Fragment key={link.to}>
+              {index > 0 && ' - '}
+              <Link to={link.to} data-tv-focusable="true" className="continue-card-context-link">{link.label}</Link>
+            </Fragment>
+          ))}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function ContinueWatchingEpisodeCard({ api, item, onOpen, onRemoveFromContinueWatching, progress, elementRef }: Props) {
+  if (!item.playbackContext) throw new Error(`Continue Watching episode ${item.id} is missing playback hierarchy context.`);
+  return (
+    <article className={cardClass(item, ' continue-card')}>
+      <button
+        type="button"
+        ref={elementRef}
+        className="continue-card-open"
+        {...openControlProps(item, () => onOpen(item))}
+        aria-label={`Resume ${item.title}`}
+      >
+        <Poster api={api} item={item} progress={progress} />
+        <span className="card-title continue-card-title">{item.title}</span>
+      </button>
+      <ContextLinks lines={contextLines(item) ?? []} />
+      {onRemoveFromContinueWatching && (
+        <CardCloseButton
+          className="continue-card-remove"
+          label={`Remove ${item.title} from Continue Watching`}
+          onClick={() => onRemoveFromContinueWatching(item)}
+        />
+      )}
+    </article>
+  );
+}
+
+/** An item shown away from its parent: the card opens it, the links go to its parents. */
+function InContextCard({ api, item, onOpen, elementRef, lines }: Props & { lines: ContextLink[][] }) {
+  return (
+    <article className={cardClass(item, ' continue-card')}>
+      <button
+        type="button"
+        ref={elementRef}
+        className="continue-card-open"
+        {...openControlProps(item, () => onOpen(item))}
+        aria-label={`${openVerb(item)} ${item.title}`}
+      >
+        <Poster api={api} item={item} />
+        <span className="card-title">{item.title}</span>
+      </button>
+      <ContextLinks lines={lines} />
+      {item.kind === 'track' && trackNumberLabel(item) && <span className="card-subtitle">{trackNumberLabel(item)}</span>}
+    </article>
+  );
+}
+
+function ContinueWatchingCard({ api, item, onOpen, onRemoveFromContinueWatching, progress, elementRef }: Props) {
+  return (
+    <article className={cardClass(item, ' continue-card')}>
+      <button
+        type="button"
+        ref={elementRef}
+        className="continue-card-open"
+        {...openControlProps(item, () => onOpen(item))}
+        aria-label={`Resume ${item.title}`}
+      >
+        <Poster api={api} item={item} progress={progress} />
+        <span className="card-title">{item.title}</span>
+        {cardSubtitle(item) && <span className="card-subtitle">{cardSubtitle(item)}</span>}
+      </button>
+      {onRemoveFromContinueWatching && (
+        <CardCloseButton
+          className="continue-card-remove"
+          label={`Remove ${item.title} from Continue Watching`}
+          onClick={() => onRemoveFromContinueWatching(item)}
+        />
+      )}
+    </article>
+  );
+}
+
+function ActionableMediaCard({ api, item, onOpen, actions = [], progress, elementRef }: Props) {
+  return (
+    <article className={cardClass(item, ' continue-card media-card-actionable')}>
+      <button
+        type="button"
+        ref={elementRef}
+        className="continue-card-open"
+        {...openControlProps(item, () => onOpen(item))}
+        aria-label={`Play ${item.title} now`}
+      >
+        <Poster api={api} item={item} progress={progress} />
+        <span className="card-title">{item.title}</span>
+        {item.kind === 'track' && item.musicContext ? (
+          // The artist sits below the album name, as it does for albums.
+          <>
+            <span className="card-subtitle">{item.musicContext.album.title}</span>
+            {item.musicContext.artist && <span className="card-subtitle">{item.musicContext.artist.title}</span>}
+          </>
+        ) : cardSubtitle(item) && <span className="card-subtitle">{cardSubtitle(item)}</span>}
+      </button>
+      <OverflowMenu
+        className="card-overflow-menu"
+        label={`More options for ${item.title}`}
+        actions={actionItems(item, !availableToPlay(item) ? actions.map((action) => ({ ...action, disabled: true })) : actions)}
+      />
+    </article>
+  );
+}
+
+export function MediaCard({ api, item, onOpen, onRemoveFromContinueWatching, actions, progress, variant = 'default', subtitle, elementRef }: Props) {
+  if (variant === 'continue-watching') {
+    if (item.kind === 'episode') {
+      return (
+        <ContinueWatchingEpisodeCard
+          api={api}
+          item={item}
+          onOpen={onOpen}
+          onRemoveFromContinueWatching={onRemoveFromContinueWatching}
+          progress={progress}
+          variant={variant}
+          elementRef={elementRef}
+        />
+      );
+    }
+
+    return (
+      <ContinueWatchingCard
+        api={api}
+        item={item}
+        onOpen={onOpen}
+        onRemoveFromContinueWatching={onRemoveFromContinueWatching}
+        progress={progress}
+        variant={variant}
+        elementRef={elementRef}
+      />
+    );
+  }
+
+  const lines = variant === 'in-context' ? contextLines(item) : undefined;
+  if (lines) return <InContextCard api={api} item={item} onOpen={onOpen} elementRef={elementRef} lines={lines} />;
+
+  if (actions?.length) {
+    return (
+      <ActionableMediaCard
+        api={api}
+        item={item}
+        onOpen={onOpen}
+        actions={actions}
+        progress={progress}
+        elementRef={elementRef}
+      />
+    );
+  }
+
+  return (
+    <button ref={elementRef} className={cardClass(item)} {...openControlProps(item, () => onOpen(item))}>
+      <Poster api={api} item={item} progress={progress} />
+      <span className="card-title">{item.title}</span>
+      {(subtitle ?? cardSubtitle(item)) && <span className="card-subtitle">{subtitle ?? cardSubtitle(item)}</span>}
+    </button>
+  );
+}

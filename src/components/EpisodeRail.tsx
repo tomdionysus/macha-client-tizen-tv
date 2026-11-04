@@ -1,0 +1,159 @@
+import { useRef, type MouseEvent, type PointerEvent, type WheelEvent } from 'react';
+import { availableToPlay } from '@machafoundation/core';
+import type { MediaApi } from '@machafoundation/core';
+import { AvailabilityMarker, openControlProps } from './Availability';
+import { LazyArtwork } from './LazyArtwork';
+import { episodeCode } from '../text/viewerText';
+import type { Episode, PlaybackProgress } from '@machafoundation/core';
+
+interface Props {
+  api: MediaApi;
+  episodes: Episode[];
+  progress: Map<string, PlaybackProgress>;
+  onOpenEpisode: (episode: Episode) => void;
+}
+
+interface DragState {
+  pointerId: number;
+  startX: number;
+  startScrollLeft: number;
+  moved: boolean;
+  captured: boolean;
+}
+
+function displayDate(value?: string): string {
+  if (!value) return 'Air date unavailable';
+  const parsed = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return new Intl.DateTimeFormat(undefined, { day: 'numeric', month: 'short', year: 'numeric' }).format(parsed);
+}
+
+function resumable(progress?: PlaybackProgress): boolean {
+  return Boolean(progress && progress.positionMs > 0 && progress.durationMs > 0);
+}
+
+function EpisodeCard({ api, episode, progress, onOpenEpisode }: {
+  api: MediaApi;
+  episode: Episode;
+  progress?: PlaybackProgress;
+  onOpenEpisode: (episode: Episode) => void;
+}) {
+  const hasProgress = resumable(progress);
+  return (
+    <article className={`episode-card${hasProgress ? ' has-progress' : ''}${!availableToPlay(episode) ? ' is-unavailable' : ''}`}>
+      <div className="episode-still-shell">
+        <button
+          className="episode-still-link"
+          {...openControlProps(episode, () => onOpenEpisode(episode))}
+          aria-label={`Open ${episode.title}`}
+          type="button"
+        >
+          <div className="episode-still">
+            <LazyArtwork
+              api={api}
+              artwork={episode.artwork?.thumbnail ?? episode.artwork?.backdrop}
+              alt={episode.title}
+              draggable={false}
+              placeholder={<div className="episode-still-placeholder">{episode.episodeNumber}</div>}
+            />
+            {progress && progress.durationMs > 0 && (
+              <div className="episode-progress-track" aria-hidden="true">
+                <div className="episode-progress-value" style={{ width: `${Math.min(100, progress.positionMs / progress.durationMs * 100)}%` }} />
+              </div>
+            )}
+            <AvailabilityMarker availability={episode.availability} kind="episode" />
+          </div>
+        </button>
+      </div>
+      <div className="episode-copy">
+        <div className="episode-heading">
+          <strong>{episodeCode(episode) ? `${episodeCode(episode)} · ` : ''}{episode.title}</strong>
+          <span>{displayDate(episode.releaseDate)}</span>
+        </div>
+        <p>{episode.synopsis || 'No description available.'}</p>
+      </div>
+    </article>
+  );
+}
+
+export function EpisodeRail({ api, episodes, progress, onOpenEpisode }: Props) {
+  const railRef = useRef<HTMLDivElement | null>(null);
+  const drag = useRef<DragState | undefined>(undefined);
+  const suppressClick = useRef(false);
+
+  const onPointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    const rail = railRef.current;
+    if (!rail || event.pointerType === 'mouse' && event.button !== 0) return;
+    drag.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startScrollLeft: rail.scrollLeft,
+      moved: false,
+      captured: false,
+    };
+  };
+
+  const onPointerMove = (event: PointerEvent<HTMLDivElement>) => {
+    const rail = railRef.current;
+    const state = drag.current;
+    if (!rail || !state || state.pointerId !== event.pointerId) return;
+    const delta = event.clientX - state.startX;
+    if (Math.abs(delta) > 6) state.moved = true;
+    if (!state.moved) return;
+
+    if (!state.captured) {
+      rail.setPointerCapture(event.pointerId);
+      state.captured = true;
+    }
+    event.preventDefault();
+    rail.scrollLeft = state.startScrollLeft - delta;
+  };
+
+  const finishDrag = (event: PointerEvent<HTMLDivElement>) => {
+    const rail = railRef.current;
+    const state = drag.current;
+    if (!rail || !state || state.pointerId !== event.pointerId) return;
+    suppressClick.current = state.moved;
+    drag.current = undefined;
+    if (state.captured && rail.hasPointerCapture(event.pointerId)) rail.releasePointerCapture(event.pointerId);
+    if (suppressClick.current) {
+      window.setTimeout(() => { suppressClick.current = false; }, 0);
+    }
+  };
+
+  const onClickCapture = (event: MouseEvent<HTMLDivElement>) => {
+    if (suppressClick.current) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  };
+
+  const onWheel = (event: WheelEvent<HTMLDivElement>) => {
+    const rail = railRef.current;
+    if (!rail || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+    if (rail.scrollWidth <= rail.clientWidth) return;
+    event.preventDefault();
+    rail.scrollLeft += event.deltaY;
+  };
+
+  return (
+    <div
+      ref={railRef}
+      className="episode-rail"
+      role="list"
+      aria-label="Episodes"
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={finishDrag}
+      onPointerCancel={finishDrag}
+      onClickCapture={onClickCapture}
+      onWheel={onWheel}
+    >
+      {episodes.map((episode) => (
+        <div key={episode.id} className="episode-rail-item" role="listitem">
+          <EpisodeCard api={api} episode={episode} progress={progress.get(episode.id)} onOpenEpisode={onOpenEpisode} />
+        </div>
+      ))}
+    </div>
+  );
+}

@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.vite/
+.env.local
+.DS_Store
+
+# TypeScript build metadata; builds are no-emit for source.
+*.tsbuildinfo

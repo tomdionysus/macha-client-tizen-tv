@@ -1,0 +1,7 @@
+@import './styles/base.css';
+@import './styles/lists.css';
+@import './styles/settings.css';
+@import './styles/metadata.css';
+@import './styles/manage.css';
+@import './styles/ingest.css';
+@import './styles/status.css';
