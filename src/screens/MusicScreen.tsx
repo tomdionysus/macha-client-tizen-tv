@@ -1,73 +1,96 @@
-import { useMemo } from 'react';
-import type { MediaApi } from '@machafoundation/core';
-import { AlphabetIndex } from '../components/AlphabetIndex';
-import { MediaCard, type MediaCardAction } from '../components/MediaCard';
-import { ErrorMessage, Loading } from '../components/Status';
-import { useAlphabetIndex } from '../hooks/useAlphabetIndex';
-import { useRefreshableAsync } from '../hooks/useRefreshableAsync';
-import { sortMediaByIndexedTitle } from '@machafoundation/core';
-import type { MediaSummary } from '@machafoundation/core';
-import { MediaPageTitle } from '../components/MediaPageTitle';
+import { useMemo, useRef } from 'react';
+import { ScrollView, View, type Style } from '../components/primitives';
+import { sortMediaByIndexedTitle, type MediaApi, type MediaSummary } from '@machafoundation/core';
+import { useRefreshableAsync } from '../hooks/useAsync';
+import { ErrorMessage, Loading, PageTitle, RefreshError } from '../components/Status';
+import { firstAvailableIndex } from '../components/availability';
+import { MediaCard } from '../components/MediaCard';
+import { scrollTarget } from '../hooks/focusScroll';
+import { scrolledExtent } from '../hooks/usePageFocusScroll';
+import { CARD_FRAME, layout, pageGutter, rem } from '../styles/theme';
 
-export type MusicSection = 'artists' | 'albums' | 'tracks';
-
-interface Props {
+/**
+ * Music: albums only, one of the web client's seven music routes. Playing an
+ * album in order, queueing and artists need the queue and the `OverflowMenu`,
+ * which the television clients do not have.
+ */
+export function MusicScreen({
+  api,
+  onOpen,
+}: {
   api: MediaApi;
-  section: MusicSection;
-  onOpen: (item: MediaSummary) => void;
-  onPlayNow: (item: MediaSummary) => void;
-  onAddToPlaylist: (item: MediaSummary) => void;
-  onPlayNext: (item: MediaSummary) => void;
-  onPlayLater: (item: MediaSummary) => void;
-  onShuffle: (item: MediaSummary) => void;
-}
-
-function titleFor(section: MusicSection): string {
-  if (section === 'artists') return 'Artists';
-  if (section === 'albums') return 'Albums';
-  return 'Tracks';
-}
-
-export function MusicScreen({ api, section, onOpen, onPlayNow, onAddToPlaylist, onPlayNext, onPlayLater, onShuffle }: Props) {
-  const result = useRefreshableAsync(() => {
-    if (section === 'artists') return api.artists();
-    if (section === 'albums') return api.albums();
-    return api.tracks();
-  }, [api, section]);
+  onOpen: (media: MediaSummary) => void;
+}): React.JSX.Element {
+  const result = useRefreshableAsync(() => api.albums(), [api]);
   const items = useMemo(() => sortMediaByIndexedTitle(result.value ?? []), [result.value]);
-  const alphabet = useAlphabetIndex(items);
+  const firstFocus = firstAvailableIndex(items);
 
-  if (!result.value) return <section className="catalogue-indexed music-browser">
-    <MediaPageTitle refreshing={result.refreshing} onRefresh={result.refresh}>Music</MediaPageTitle>
-    {result.loading ? <Loading /> : result.error ? <ErrorMessage error={result.error} /> : null}
-  </section>;
+  const scroller = useRef<HTMLDivElement | null>(null);
+  const cards = useRef(new Map<number, HTMLDivElement>());
 
-  const actions: MediaCardAction[] = section === 'artists' ? [] : [
-    { label: section === 'albums' ? 'Add album to playlist' : 'Add track to playlist', onSelect: onAddToPlaylist },
-    ...(section === 'albums' ? [{ label: 'Shuffle', onSelect: onShuffle }] : []),
-    { label: 'Play next', onSelect: onPlayNext },
-    { label: 'Play later', onSelect: onPlayLater },
-    { label: section === 'albums' ? 'View album' : 'View track', onSelect: onOpen },
-  ];
+  const revealCard = (index: number) => {
+    const card = cards.current.get(index);
+    const view = scroller.current;
+    if (!card || !view) return;
+    const target = scrollTarget(scrolledExtent(view, card, 'y'), view.clientHeight, view.scrollTop, rem(1.4));
+    if (target === undefined) return;
+    view.scrollTop = target;
+  };
+
+  if (!result.value) {
+    return (
+      <ScrollView contentStyle={styles.page}>
+        <PageTitle>Music</PageTitle>
+        {result.loading ? <Loading /> : result.error ? <ErrorMessage error={result.error} /> : null}
+      </ScrollView>
+    );
+  }
 
   return (
-    <section className="catalogue-indexed music-browser">
-      <MediaPageTitle refreshing={result.refreshing} onRefresh={result.refresh}>Music</MediaPageTitle>
-      {result.error && <p className="manage-error media-refresh-error">Refresh failed: {result.error.message}</p>}
-      <h2 className="music-browser-heading">{titleFor(section)}</h2>
-      <div className="media-grid">
-        {items.map((item) => (
-          <MediaCard
+    <ScrollView ref={scroller} contentStyle={styles.page}>
+      <PageTitle>Music</PageTitle>
+      {result.error ? <RefreshError error={result.error} /> : null}
+      <View style={styles.grid}>
+        {items.map((item, index) => (
+          <View
             key={item.id}
-            api={api}
-            item={item}
-            onOpen={section === 'tracks' ? onPlayNow : onOpen}
-            actions={actions}
-            elementRef={(element) => alphabet.registerItem(item.id, element)}
-          />
+            ref={(element) => {
+              if (element) cards.current.set(index, element);
+              else cards.current.delete(index);
+            }}
+            style={styles.cell}
+          >
+            <MediaCard
+              media={item}
+              onSelect={() => onOpen(item)}
+              defaultFocus={index === firstFocus}
+              onFocusChange={(focused) => focused && revealCard(index)}
+            />
+          </View>
         ))}
-      </div>
-      <AlphabetIndex availableKeys={alphabet.availableKeys} onSelect={alphabet.jumpTo} />
-    </section>
+      </View>
+    </ScrollView>
   );
 }
+
+// `.media-grid { gap: 1.4rem 1rem }`, less each card's focus frame. See `layout.rowGap`.
+const rowGap = Math.max(rem(0.5), rem(1.4) - CARD_FRAME * 2);
+const columnGap = layout.rowGap;
+
+const styles = {
+  page: {
+    paddingTop: rem(1),
+    paddingBottom: rem(4),
+  },
+  grid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    paddingLeft: pageGutter,
+    // Each cell carries the column gap on its right, so the last column's is taken off the gutter.
+    paddingRight: pageGutter - columnGap,
+  },
+  cell: {
+    marginRight: columnGap,
+    marginBottom: rowGap,
+  },
+} satisfies Record<string, Style>;

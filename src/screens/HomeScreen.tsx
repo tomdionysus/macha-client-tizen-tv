@@ -1,45 +1,122 @@
-import { useMemo } from 'react';
-import type { CatalogueApi, MediaApi } from '@machafoundation/core';
-import { useCurrentAvailability } from '../hooks/useCurrentAvailability';
-import type { MediaSummary, PlaybackProgress } from '@machafoundation/core';
-import { useRefreshableAsync } from '../hooks/useRefreshableAsync';
-import { ErrorMessage, Loading } from '../components/Status';
+import { ScrollView, View, type Style } from '../components/primitives';
+import {
+  currentAvailability,
+  newestCatalogueFirst,
+  withoutAvailability,
+  type CatalogueApi,
+  type MediaApi,
+  type MediaSummary,
+  type PlaybackProgress,
+} from '@machafoundation/core';
+import { useAsync, useRefreshableAsync } from '../hooks/useAsync';
+import { ErrorMessage, Loading, PageTitle, RefreshError } from '../components/Status';
 import { MediaRow } from '../components/MediaRow';
-import { newestCatalogueFirst } from '@machafoundation/core';
-import { MediaPageTitle } from '../components/MediaPageTitle';
+import { usePageFocusScroll } from '../hooks/usePageFocusScroll';
+import { rem } from '../styles/theme';
 
-interface Props {
+/** Home, as the web client's: Continue Watching, then three rails of the fourteen newest. */
+export function HomeScreen({
+  api,
+  catalogue,
+  continueWatching,
+  onOpen,
+  onResume,
+  onRemoveFromContinueWatching,
+}: {
   api: MediaApi;
-  /** Reads Continue Watching's availability now: the store does not keep it. */
-  catalogue: Pick<CatalogueApi, 'get'>;
+  /** For Continue Watching's current availability. */
+  catalogue: CatalogueApi;
   continueWatching: PlaybackProgress[];
-  onOpen: (item: MediaSummary) => void;
-  onResume: (item: MediaSummary) => void;
-  onRemoveFromContinueWatching: (item: MediaSummary) => void;
-}
-
-export function HomeScreen({ api, catalogue, continueWatching, onOpen, onResume, onRemoveFromContinueWatching }: Props) {
+  onOpen: (media: MediaSummary) => void;
+  onResume: (media: MediaSummary) => void;
+  /** Forget this entry. */
+  onRemoveFromContinueWatching: (media: MediaSummary) => void;
+}): React.JSX.Element {
   const home = useRefreshableAsync(() => api.home(), [api]);
-  const stored = useMemo(() => continueWatching.flatMap((entry) => entry.media ? [entry.media] : []), [continueWatching]);
-  const progressItems = useCurrentAvailability(stored, catalogue);
-  if (!home.value) return <section>
-    <MediaPageTitle refreshing={home.refreshing} onRefresh={home.refresh}>Home</MediaPageTitle>
-    {home.loading ? <Loading /> : home.error ? <ErrorMessage error={home.error} /> : null}
-  </section>;
+  /**
+   * Entries store no availability, so markers come from a fresh read of each
+   * title. Without an answer a card has no marker and stays playable.
+   */
+  const continueIds = continueWatching.flatMap((entry) => (entry.media ? [entry.media.id] : []));
+  const continueKey = continueIds.join('\n');
+  const current = useAsync((signal) => currentAvailability(continueIds, catalogue, signal), [catalogue, continueKey]);
+  const { scroller, measureRow, revealRow } = usePageFocusScroll(rem(1));
 
-  const progressMap = new Map(continueWatching.map((entry) => [entry.itemId, entry]));
-  const recentMovies = newestCatalogueFirst(home.value.movies).slice(0, 14);
-  const recentShows = newestCatalogueFirst(home.value.shows).slice(0, 14);
-  const recentAlbums = newestCatalogueFirst(home.value.albums).slice(0, 14);
+  if (!home.value) {
+    return (
+      <ScrollView contentStyle={styles.page}>
+        <PageTitle>Home</PageTitle>
+        {home.loading ? <Loading /> : home.error ? <ErrorMessage error={home.error} /> : null}
+      </ScrollView>
+    );
+  }
+
+  const progressItems = continueWatching.flatMap((entry) =>
+    entry.media ? [{ ...withoutAvailability(entry.media), ...current.value?.get(entry.media.id) }] : [],
+  );
+  const progressById = new Map(continueWatching.map((entry) => [entry.itemId, entry]));
+
+  const progressFor = (media: MediaSummary): number | undefined => {
+    const entry = progressById.get(media.id);
+    if (!entry || entry.durationMs <= 0) return undefined;
+    return entry.positionMs / entry.durationMs;
+  };
 
   return (
-    <>
-      <MediaPageTitle refreshing={home.refreshing} onRefresh={home.refresh}>Home</MediaPageTitle>
-      {home.error && <p className="manage-error media-refresh-error">Refresh failed: {home.error.message}</p>}
-      <MediaRow api={api} title="Continue Watching" items={progressItems} onOpen={onResume} onRemoveFromContinueWatching={onRemoveFromContinueWatching} progress={progressMap} variant="continue-watching" />
-      <MediaRow api={api} title="Movies" items={recentMovies} onOpen={onOpen} />
-      <MediaRow api={api} title="TV Shows" items={recentShows} onOpen={onOpen} />
-      <MediaRow api={api} title="Music" items={recentAlbums} onOpen={onOpen} />
-    </>
+    // The page follows focus; nothing else scrolls it.
+    <ScrollView ref={scroller} contentStyle={styles.page}>
+      <PageTitle>Home</PageTitle>
+      {home.error ? <RefreshError error={home.error} /> : null}
+      <View ref={measureRow('continue')}>
+        <MediaRow
+          title="Continue Watching"
+          rail="continue"
+          items={progressItems}
+          onSelect={onResume}
+          onRemove={onRemoveFromContinueWatching}
+          onOpenLink={onOpen}
+          progressFor={progressFor}
+          defaultFocusFirst
+          onRowFocus={() => revealRow('continue')}
+        />
+      </View>
+      <View ref={measureRow('movies')}>
+        <MediaRow
+          title="Movies"
+          rail="movies"
+          items={newestCatalogueFirst(home.value.movies).slice(0, 14)}
+          onSelect={onOpen}
+          defaultFocusFirst={progressItems.length === 0}
+          onRowFocus={() => revealRow('movies')}
+        />
+      </View>
+      <View ref={measureRow('shows')}>
+        <MediaRow
+          title="TV Shows"
+          rail="shows"
+          items={newestCatalogueFirst(home.value.shows).slice(0, 14)}
+          onSelect={onOpen}
+          onRowFocus={() => revealRow('shows')}
+        />
+      </View>
+      <View ref={measureRow('music')}>
+        <MediaRow
+          title="Music"
+          rail="music"
+          items={newestCatalogueFirst(home.value.albums).slice(0, 14)}
+          onSelect={onOpen}
+          onRowFocus={() => revealRow('music')}
+        />
+      </View>
+    </ScrollView>
   );
 }
+
+const styles = {
+  // `main { padding: 1rem 3vw 4rem }`. The rails apply the horizontal gutter
+  // themselves so a focused card can scroll flush to the screen edge.
+  page: {
+    paddingTop: rem(1),
+    paddingBottom: rem(4),
+  },
+} satisfies Record<string, Style>;

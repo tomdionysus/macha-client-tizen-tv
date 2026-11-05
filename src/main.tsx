@@ -1,47 +1,20 @@
-import ReactDOM from 'react-dom/client';
-import '@fontsource-variable/roboto/wght.css';
-import App from './App';
-import { AppRouter } from './app/AppRouter';
-import { runBootSplash } from './bootSplash';
-import {
-  configureClientDiagnostics,
-  configureMachaHost,
-  createClientLogger,
-} from '@machafoundation/core';
-import { installClientDiagnosticsConsole } from './diagnostics/console';
-import { installLogcatConsoleBridge } from './diagnostics/logcatConsole';
-import { detectPlatform } from './platform';
-import { diagnosticsSettings } from './settings';
-import { installDirectPlayReadAheadDiagnostics, warmDirectPlayReadAhead } from './playback/directPlayReadAhead';
-import { installAbortControllerPolyfill } from './platform/AbortControllerPolyfill';
+import { createRoot } from 'react-dom/client';
+import '@fontsource/roboto/400.css';
+import '@fontsource/roboto/500.css';
+import '@fontsource/roboto/700.css';
 import './styles.css';
+import { installAbortControllerPolyfill } from './platform/AbortControllerPolyfill';
+import { App } from './App';
 
-const samsung = import.meta.env.MODE === 'samsung';
-const android = import.meta.env.MODE === 'android';
-// Before anything logs: logcat is the Android TV's only console, and it flattens
-// object arguments to `[object Object]`.
-if (android) installLogcatConsoleBridge();
+// Chromium 47 has no `AbortController`, and core's bounded requests need
+// one: this must run before anything fetches.
 installAbortControllerPolyfill(window);
-// Core auto-detects everything but the origin, which relative artwork and stream URLs resolve
-// against, and whether http nodes are blocked. Only an https page blocks them: `isSecureContext`
-// is also true for http://localhost and the TVs' file:// pages, which reach http nodes fine.
-configureMachaHost({ origin: window.location.origin, secureContext: window.location.protocol === 'https:' });
-configureClientDiagnostics({
-  level: samsung ? 'warn' : diagnosticsSettings.playbackLogLevel,
-  console: samsung ? false : diagnosticsSettings.playbackConsole,
-  maxEntries: samsung ? 256 : diagnosticsSettings.playbackLogBufferEntries,
-});
-installClientDiagnosticsConsole();
-if (!samsung) installDirectPlayReadAheadDiagnostics();
-const log = createClientLogger('app.boot');
 
-function describeError(error: unknown): string {
-  if (error instanceof Error) return error.stack || error.message;
-  return String(error);
-}
-
-function showSamsungFatal(error: unknown): void {
-  if (!samsung) return;
+/**
+ * A television has no console. A crash is written over the page in words,
+ * so the failure can be read from the sofa.
+ */
+function showFatal(error: unknown): void {
   const root = document.getElementById('root') ?? document.body;
   const message = document.createElement('pre');
   message.style.background = '#180000';
@@ -51,42 +24,15 @@ function showSamsungFatal(error: unknown): void {
   message.style.margin = '0';
   message.style.padding = '32px';
   message.style.whiteSpace = 'pre-wrap';
-  message.textContent = `Macha Samsung runtime failure\n\n${describeError(error)}\n\n${navigator.userAgent}`;
+  const described = error instanceof Error ? error.stack || error.message : String(error);
+  message.textContent = `Macha runtime failure\n\n${described}\n\n${navigator.userAgent}`;
   while (root.firstChild) root.removeChild(root.firstChild);
   root.appendChild(message);
 }
 
-if (samsung) {
-  window.addEventListener('error', (event) => showSamsungFatal(event.error ?? event.message));
-  window.addEventListener('unhandledrejection', (event) => showSamsungFatal(event.reason));
-}
+window.addEventListener('error', (event) => showFatal(event.error ?? event.message));
+window.addEventListener('unhandledrejection', (event) => showFatal(event.reason));
 
-async function boot(): Promise<void> {
-  const rootElement = document.getElementById('root');
-  if (!rootElement) throw new Error('Missing #root element');
-
-  log.info('boot-start', { href: window.location.href, userAgent: navigator.userAgent });
-  // The splash is an overlay, never a boot dependency: the application mounts at once.
-  const splashHost = document.createElement('div');
-  splashHost.style.pointerEvents = 'none';
-  document.body.appendChild(splashHost);
-  void runBootSplash(splashHost).finally(() => {
-    splashHost.remove();
-    log.debug('splash-complete');
-  });
-
-  const platform = detectPlatform();
-  log.info('platform-detected', { platform: platform.name });
-  if (platform.name === 'web') warmDirectPlayReadAhead();
-  ReactDOM.createRoot(rootElement).render(
-    <AppRouter>
-      <App platform={platform} />
-    </AppRouter>,
-  );
-  log.info('react-mounted');
-}
-
-void boot().catch((error) => {
-  log.error('boot-failed', error);
-  showSamsungFatal(error);
-});
+const rootElement = document.getElementById('root');
+if (!rootElement) throw new Error('Missing #root element');
+createRoot(rootElement).render(<App />);

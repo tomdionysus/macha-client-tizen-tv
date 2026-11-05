@@ -1,276 +1,442 @@
-import { Fragment } from 'react';
-import { availableToPlay, isPlayableKind } from '@machafoundation/core';
-import { Link } from 'react-router-dom';
-import type { MediaApi } from '@machafoundation/core';
-import { routes } from '@machafoundation/core';
-import { albumLabel, cardSubtitle, episodeLabel, seasonLabel, seriesPlaceText, trackNumberLabel } from '../text/viewerText';
+import { useState } from 'react';
+import { css, Text, View, type Style } from './primitives';
 import type { MediaSummary } from '@machafoundation/core';
-import { AvailabilityMarker, openControlProps } from './Availability';
-import { CardCloseButton } from './CardCloseButton';
+import { cardLines, contextLinks, linkStep, type CardLink } from './cardLines';
+import { Focusable } from './Focusable';
+import { AvailabilityMarker } from './AvailabilityMarker';
+import { cardInteraction } from './availability';
 import { LazyArtwork } from './LazyArtwork';
-import { OverflowMenu, type OverflowMenuAction } from './OverflowMenu';
-
-export interface MediaCardAction {
-  label: string;
-  onSelect: (item: MediaSummary) => void;
-  disabled?: boolean;
-  destructive?: boolean;
-}
-
-interface Props {
-  api: MediaApi;
-  item: MediaSummary;
-  onOpen: (item: MediaSummary) => void;
-  onRemoveFromContinueWatching?: (item: MediaSummary) => void;
-  actions?: readonly MediaCardAction[];
-  progress?: number;
-  /** `in-context` names an episode's series and season, or a track's artist and album, for a list that is neither's. */
-  variant?: 'default' | 'continue-watching' | 'in-context';
-  /** The second line, in place of the kind's own: a book's place on a series page. */
-  subtitle?: string;
-  elementRef?: (element: HTMLButtonElement | null) => void;
-}
-
-function artworkClass(item: MediaSummary): string {
-  return item.kind === 'album' || item.kind === 'artist' || item.kind === 'track' ? 'poster music-artwork' : 'poster';
-}
-
-function Poster({ api, item, progress }: Pick<Props, 'api' | 'item' | 'progress'>) {
-  return (
-    <div className={artworkClass(item)}>
-      <LazyArtwork
-        api={api}
-        artwork={item.artwork?.poster ?? item.artwork?.thumbnail}
-        alt={item.title}
-        placeholder={<div className="poster-placeholder">{item.title.slice(0, 1)}</div>}
-      />
-      {progress !== undefined && progress > 0 && (
-        <div className="progress-track"><div className="progress-value" style={{ width: `${Math.min(100, progress * 100)}%` }} /></div>
-      )}
-      <AvailabilityMarker availability={item.availability} members={item.availabilityMembers} kind={item.kind} />
-    </div>
-  );
-}
-
-function cardClass(item: MediaSummary, extra = ''): string {
-  return `media-card media-card-${item.kind}${extra}${!availableToPlay(item) ? ' is-unavailable' : ''}`;
-}
-
-function actionItems(item: MediaSummary, actions: readonly MediaCardAction[]): OverflowMenuAction[] {
-  return actions.map((action) => ({
-    label: action.label,
-    disabled: action.disabled,
-    destructive: action.destructive,
-    onSelect: () => action.onSelect(item),
-  }));
-}
-
-type ContextLink = { to: string; label: string };
+import { mediaFocusId } from '../hooks/useAlphabetIndex';
+import { tvFocus } from '../hooks/tvFocus';
+import { useMacha } from '../app/MachaProvider';
+import { colour, focusFrame, font, layout, lineHeightPx, px, radius, rem, type } from '../styles/theme';
 
 /**
- * An item's parents as links, one line per entry: an episode's series, then
- * its season mark; a track's artist and album together; a book's authors,
- * then its series with its place in each.
+ * A poster card, from `.media-card` / `.poster` / `.card-title` in base.css,
+ * with its own focus treatment rather than the shared ring.
  */
-function contextLines(item: MediaSummary): ContextLink[][] | undefined {
-  if (item.kind === 'episode' && item.playbackContext) {
-    const { series, season } = item.playbackContext;
-    return [
-      [{ to: routes.show(series.id), label: series.title }],
-      [{ to: routes.season(series.id, season.id), label: episodeLabel(item) ?? (season.title || seasonLabel(season.seasonNumber) || series.title) }],
-    ];
-  }
-  if (item.kind === 'track' && item.musicContext) {
-    const { artist, album } = item.musicContext;
-    return [[
-      ...(artist ? [{ to: routes.artist(artist.id), label: artist.title }] : []),
-      { to: routes.album(album.id), label: albumLabel(item.musicContext) },
-    ]];
-  }
-  if (item.kind === 'book' && item.bookContext) {
-    const authors = item.bookContext.authors.filter((author) => author.title).map((author) => ({ to: routes.bookAuthor(author.id), label: author.title as string }));
-    const series = item.bookContext.series.filter((entry) => entry.title).map((entry) => ({
-      to: routes.bookSeries(entry.id),
-      label: seriesPlaceText(entry.title as string, entry.index),
-    }));
-    const lines = [authors, series].filter((line) => line.length > 0);
-    return lines.length > 0 ? lines : undefined;
-  }
-  return undefined;
-}
+export function MediaCard({
+  media,
+  onSelect,
+  defaultFocus,
+  progress,
+  onFocusChange,
+  addressable = false,
+  squareInPosterHeight = false,
+  onRemove,
+  onOpenLink,
+  rail,
+}: {
+  media: MediaSummary;
+  onSelect?: () => void;
+  defaultFocus?: boolean;
+  /**
+   * Give the card a focus id derived from its media id. Off by default: ids
+   * must be unique on screen, and two rows can show the same title.
+   */
+  addressable?: boolean;
+  /** Centre square music art in a 2:3 poster's height, for a grid mixing both (Search). */
+  squareInPosterHeight?: boolean;
+  /** 0–1, drawn across the poster foot. */
+  progress?: number;
+  onFocusChange?: (focused: boolean) => void;
+  /** Draw a remove button over the card, as its own focus target (Continue Watching). */
+  onRemove?: () => void;
+  /**
+   * Show an episode's series and season as links under its title, each its
+   * own focus target (the web client's Continue Watching and Search cards).
+   */
+  onOpenLink?: (target: MediaSummary) => void;
+  /** The card's row, making its focus id unique per row; see `mediaFocusId`. */
+  rail?: string;
+}): React.JSX.Element {
+  const { services } = useMacha();
+  const mediaApi = services.mediaApi;
+  const artwork = media.artwork?.poster ?? media.artwork?.thumbnail;
+  const isSquare = media.kind === 'album' || media.kind === 'artist' || media.kind === 'track';
+  const links = onOpenLink ? contextLinks(media) : undefined;
+  // The links replace the lines they would repeat.
+  const lines = links ? [] : cardLines(media);
+  // OK does nothing on an unavailable title; see `cardInteraction` for when
+  // it may still take focus.
+  const interaction = cardInteraction(media, Boolean(onRemove));
+  const playable = interaction.selectable;
+  // The remove button's focus pairing; see `CardCloseButton`.
+  const [cardFocused, setCardFocused] = useState(false);
+  const [closeFocused, setCloseFocused] = useState(false);
+  const [focusedLink, setFocusedLink] = useState<number | undefined>(undefined);
+  const cardId = addressable || rail ? mediaFocusId(media.id, rail) : onRemove || links ? `card:${media.id}` : undefined;
+  const closeId = `remove:${media.id}`;
+  const linkId = (index: number) => `${cardId}:link:${index}`;
+  const stepTo = (step: 'card' | number) => tvFocus.select(step === 'card' ? cardId : linkId(step));
 
-/** What opening a card does, for its label: a book is read, not played. */
-function openVerb(item: MediaSummary): string {
-  return isPlayableKind(item.kind) ? 'Play' : 'Open';
-}
-
-function ContextLinks({ lines }: { lines: ReadonlyArray<ReadonlyArray<ContextLink>> }) {
-  return (
-    <div className="continue-card-context">
-      {lines.map((line) => (
-        <span key={line.map((link) => link.to).join(' ')} className="continue-card-context-line">
-          {line.map((link, index) => (
-            <Fragment key={link.to}>
-              {index > 0 && ' - '}
-              <Link to={link.to} data-tv-focusable="true" className="continue-card-context-link">{link.label}</Link>
-            </Fragment>
+  const card = (
+    <Focusable
+      ring={false}
+      {...(cardId ? { focusId: cardId } : {})}
+      onSelect={playable ? onSelect : undefined}
+      disabled={!interaction.focusable}
+      defaultFocus={defaultFocus}
+      onFocusChange={(focused) => {
+        setCardFocused(focused);
+        onFocusChange?.(focused);
+      }}
+      // Up goes to the remove button and Down to the links; the scorer
+      // cannot reach a centre inside the card.
+      {...(onRemove || links
+        ? {
+            ownsDirection: (direction: string) =>
+              (direction === 'up' && Boolean(onRemove)) || (links !== undefined && linkStep('card', direction, links.length) !== undefined),
+            onDirection: (direction: string) => {
+              if (direction === 'up' && onRemove) tvFocus.select(closeId);
+              const step = links && linkStep('card', direction, links.length);
+              if (step !== undefined) stepTo(step);
+            },
+          }
+        : {})}
+      style={styles.card}
+      focusedStyle={styles.cardFocused}
+    >
+      {({ focused }) => (
+        <>
+          {/* Square art centred in a 2:3 box in mixed grids; otherwise a plain wrapper. */}
+          <View style={isSquare && squareInPosterHeight ? styles.posterSlot : undefined}>
+            <View
+              style={css(
+                styles.poster,
+                isSquare && styles.posterSquare,
+                focused && styles.posterFocused,
+              )}
+            >
+              <View style={css(styles.fill, !playable && styles.greyed)}>
+                {artwork ? (
+                  // Not a plain `Image`: the URL is re-signed on every catalogue
+                  // fetch, which defeats a URL-keyed cache.
+                  <LazyArtwork api={mediaApi} artwork={artwork} style={styles.image} />
+                ) : null}
+                {artwork ? null : (
+                  <View style={styles.placeholder}>
+                    <Text style={styles.placeholderGlyph}>{media.title.charAt(0).toUpperCase()}</Text>
+                  </View>
+                )}
+              </View>
+              {progress !== undefined && progress > 0 && (
+                <View style={styles.progressTrack}>
+                  <View style={css(styles.progressValue, { width: `${Math.min(100, progress * 100)}%` })} />
+                </View>
+              )}
+              <AvailabilityMarker media={media} overlay />
+            </View>
+          </View>
+          <Text style={css(styles.title, !playable && styles.greyed)} numberOfLines={1}>
+            {media.title}
+          </Text>
+          {lines.map((line) => (
+            <Text key={line} style={css(styles.subtitle, !playable && styles.greyed)} numberOfLines={1}>
+              {line}
+            </Text>
           ))}
-        </span>
-      ))}
-    </div>
-  );
-}
-
-function ContinueWatchingEpisodeCard({ api, item, onOpen, onRemoveFromContinueWatching, progress, elementRef }: Props) {
-  if (!item.playbackContext) throw new Error(`Continue Watching episode ${item.id} is missing playback hierarchy context.`);
-  return (
-    <article className={cardClass(item, ' continue-card')}>
-      <button
-        type="button"
-        ref={elementRef}
-        className="continue-card-open"
-        {...openControlProps(item, () => onOpen(item))}
-        aria-label={`Resume ${item.title}`}
-      >
-        <Poster api={api} item={item} progress={progress} />
-        <span className="card-title continue-card-title">{item.title}</span>
-      </button>
-      <ContextLinks lines={contextLines(item) ?? []} />
-      {onRemoveFromContinueWatching && (
-        <CardCloseButton
-          className="continue-card-remove"
-          label={`Remove ${item.title} from Continue Watching`}
-          onClick={() => onRemoveFromContinueWatching(item)}
-        />
+        </>
       )}
-    </article>
+    </Focusable>
   );
-}
 
-/** An item shown away from its parent: the card opens it, the links go to its parents. */
-function InContextCard({ api, item, onOpen, elementRef, lines }: Props & { lines: ContextLink[][] }) {
+  if (!onRemove && !links) return card;
   return (
-    <article className={cardClass(item, ' continue-card')}>
-      <button
-        type="button"
-        ref={elementRef}
-        className="continue-card-open"
-        {...openControlProps(item, () => onOpen(item))}
-        aria-label={`${openVerb(item)} ${item.title}`}
-      >
-        <Poster api={api} item={item} />
-        <span className="card-title">{item.title}</span>
-      </button>
-      <ContextLinks lines={lines} />
-      {item.kind === 'track' && trackNumberLabel(item) && <span className="card-subtitle">{trackNumberLabel(item)}</span>}
-    </article>
-  );
-}
-
-function ContinueWatchingCard({ api, item, onOpen, onRemoveFromContinueWatching, progress, elementRef }: Props) {
-  return (
-    <article className={cardClass(item, ' continue-card')}>
-      <button
-        type="button"
-        ref={elementRef}
-        className="continue-card-open"
-        {...openControlProps(item, () => onOpen(item))}
-        aria-label={`Resume ${item.title}`}
-      >
-        <Poster api={api} item={item} progress={progress} />
-        <span className="card-title">{item.title}</span>
-        {cardSubtitle(item) && <span className="card-subtitle">{cardSubtitle(item)}</span>}
-      </button>
-      {onRemoveFromContinueWatching && (
+    <View>
+      {card}
+      {links && onOpenLink ? (
+        <View style={styles.links}>
+          {links.map((link, index) => (
+            <CardLinkButton
+              key={link.target.id}
+              link={link}
+              focusId={linkId(index)}
+              reachable={cardFocused || focusedLink !== undefined}
+              onSelect={() => onOpenLink(link.target)}
+              onFocusChange={(focused) => setFocusedLink((current) => (focused ? index : current === index ? undefined : current))}
+              step={(direction) => linkStep(index, direction, links.length)}
+              onStep={stepTo}
+              afterFirst={index > 0}
+            />
+          ))}
+        </View>
+      ) : null}
+      {onRemove ? (
         <CardCloseButton
-          className="continue-card-remove"
-          label={`Remove ${item.title} from Continue Watching`}
-          onClick={() => onRemoveFromContinueWatching(item)}
+          focusId={closeId}
+          reachable={cardFocused || closeFocused}
+          onSelect={onRemove}
+          onFocusChange={setCloseFocused}
+          onDown={() => cardId && tvFocus.select(cardId)}
         />
+      ) : null}
+    </View>
+  );
+}
+
+/**
+ * `.continue-card-context-link`: one of a card's links. Like the remove
+ * button it is a focus candidate only while it, a sibling or its card has
+ * focus; Up and Down walk the card and its links (`linkStep`).
+ */
+function CardLinkButton({
+  link,
+  focusId,
+  reachable,
+  onSelect,
+  onFocusChange,
+  step,
+  onStep,
+  afterFirst,
+}: {
+  link: CardLink;
+  focusId: string;
+  reachable: boolean;
+  onSelect: () => void;
+  onFocusChange: (focused: boolean) => void;
+  step: (direction: string) => 'card' | number | undefined;
+  onStep: (to: 'card' | number) => void;
+  afterFirst: boolean;
+}): React.JSX.Element {
+  return (
+    <Focusable
+      ring={false}
+      focusId={focusId}
+      disabled={!reachable}
+      onFocusChange={onFocusChange}
+      ownsDirection={(direction) => step(direction) !== undefined}
+      onDirection={(direction) => {
+        const to = step(direction);
+        if (to !== undefined) onStep(to);
+      }}
+      onSelect={onSelect}
+      style={css(styles.link, afterFirst && styles.linkAfterFirst)}
+      focusedStyle={styles.linkFocused}
+    >
+      {({ focused }) => (
+        <Text style={css(styles.linkText, focused && styles.linkTextFocused)} numberOfLines={1}>
+          {link.label}
+        </Text>
       )}
-    </article>
+    </Focusable>
   );
 }
 
-function ActionableMediaCard({ api, item, onOpen, actions = [], progress, elementRef }: Props) {
+/**
+ * `.card-close-button.continue-card-remove`: a small × at the card's top
+ * right. It sits inside the card, where the scorer cannot reach it and where
+ * it would steal focus from the poster, so it is a focus candidate only while
+ * it or its card has focus: Up from the card selects it, Down returns.
+ */
+function CardCloseButton({
+  focusId,
+  reachable,
+  onSelect,
+  onFocusChange,
+  onDown,
+}: {
+  focusId: string;
+  reachable: boolean;
+  onSelect: () => void;
+  onFocusChange: (focused: boolean) => void;
+  onDown: () => void;
+}): React.JSX.Element {
   return (
-    <article className={cardClass(item, ' continue-card media-card-actionable')}>
-      <button
-        type="button"
-        ref={elementRef}
-        className="continue-card-open"
-        {...openControlProps(item, () => onOpen(item))}
-        aria-label={`Play ${item.title} now`}
-      >
-        <Poster api={api} item={item} progress={progress} />
-        <span className="card-title">{item.title}</span>
-        {item.kind === 'track' && item.musicContext ? (
-          // The artist sits below the album name, as it does for albums.
-          <>
-            <span className="card-subtitle">{item.musicContext.album.title}</span>
-            {item.musicContext.artist && <span className="card-subtitle">{item.musicContext.artist.title}</span>}
-          </>
-        ) : cardSubtitle(item) && <span className="card-subtitle">{cardSubtitle(item)}</span>}
-      </button>
-      <OverflowMenu
-        className="card-overflow-menu"
-        label={`More options for ${item.title}`}
-        actions={actionItems(item, !availableToPlay(item) ? actions.map((action) => ({ ...action, disabled: true })) : actions)}
-      />
-    </article>
+    <Focusable
+      ring={false}
+      focusId={focusId}
+      disabled={!reachable}
+      onFocusChange={onFocusChange}
+      ownsDirection={(direction) => direction === 'down'}
+      onDirection={(direction) => direction === 'down' && onDown()}
+      onSelect={onSelect}
+      style={styles.close}
+      focusedStyle={styles.closeFocused}
+    >
+      {({ focused }) => <Text style={css(styles.closeGlyph, focused && styles.closeGlyphFocused)}>×</Text>}
+    </Focusable>
   );
 }
 
-export function MediaCard({ api, item, onOpen, onRemoveFromContinueWatching, actions, progress, variant = 'default', subtitle, elementRef }: Props) {
-  if (variant === 'continue-watching') {
-    if (item.kind === 'episode') {
-      return (
-        <ContinueWatchingEpisodeCard
-          api={api}
-          item={item}
-          onOpen={onOpen}
-          onRemoveFromContinueWatching={onRemoveFromContinueWatching}
-          progress={progress}
-          variant={variant}
-          elementRef={elementRef}
-        />
-      );
-    }
+/** The artwork's width: the card less its padding. `aspect-ratio` postdates this engine, so heights are stated. */
+const POSTER_WIDTH = layout.mediaCardWidth - rem(0.35) * 2;
 
-    return (
-      <ContinueWatchingCard
-        api={api}
-        item={item}
-        onOpen={onOpen}
-        onRemoveFromContinueWatching={onRemoveFromContinueWatching}
-        progress={progress}
-        variant={variant}
-        elementRef={elementRef}
-      />
-    );
-  }
-
-  const lines = variant === 'in-context' ? contextLines(item) : undefined;
-  if (lines) return <InContextCard api={api} item={item} onOpen={onOpen} elementRef={elementRef} lines={lines} />;
-
-  if (actions?.length) {
-    return (
-      <ActionableMediaCard
-        api={api}
-        item={item}
-        onOpen={onOpen}
-        actions={actions}
-        progress={progress}
-        elementRef={elementRef}
-      />
-    );
-  }
-
-  return (
-    <button ref={elementRef} className={cardClass(item)} {...openControlProps(item, () => onOpen(item))}>
-      <Poster api={api} item={item} progress={progress} />
-      <span className="card-title">{item.title}</span>
-      {(subtitle ?? cardSubtitle(item)) && <span className="card-subtitle">{subtitle ?? cardSubtitle(item)}</span>}
-    </button>
-  );
-}
+const styles = {
+  // `.continue-card-context { display: grid; gap: .08rem; margin-top: .28rem }`,
+  // inset by the card's `.35rem` padding, which the links sit inside on the web.
+  links: {
+    marginTop: rem(0.28),
+    paddingLeft: rem(0.35),
+    paddingRight: rem(0.35),
+  },
+  /**
+   * `.continue-card-context-link:focus-visible { text-decoration: underline;
+   * text-decoration-color: var(--focus) }`, drawn as a bottom border, as the
+   * Android client draws it. Always present, so focus changes only the colour.
+   */
+  link: {
+    alignSelf: 'flex-start',
+    maxWidth: '100%',
+    borderBottomWidth: 1,
+    borderBottomStyle: 'solid',
+    borderBottomColor: 'transparent',
+  },
+  linkAfterFirst: {
+    marginTop: rem(0.08),
+  },
+  linkFocused: {
+    borderBottomColor: colour.focus,
+  },
+  // `.continue-card-context-line { color: var(--text-dim); font-size: .82rem; line-height: 1.35 }`
+  linkText: {
+    color: colour.textDim,
+    fontSize: rem(0.82),
+    lineHeight: lineHeightPx(rem(0.82 * 1.35)),
+  },
+  // `.continue-card-context-link:focus-visible { color: #dedee2 }`
+  linkTextFocused: {
+    color: '#dedee2',
+  },
+  /**
+   * `.card-close-button { position: absolute; width: 1.8rem; height: 1.8rem;
+   * border: 1px solid #ffffff18; border-radius: .48rem; background: #08080ac9;
+   * color: #dedee2; font-size: 1.25rem; opacity: .78 }` and
+   * `.continue-card-remove { top: .78rem; right: .78rem }`.
+   */
+  close: {
+    position: 'absolute',
+    top: rem(0.78),
+    right: rem(0.78),
+    width: rem(1.8),
+    height: rem(1.8),
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderStyle: 'solid',
+    borderColor: 'rgba(255,255,255,0.094)',
+    borderRadius: rem(0.48),
+    backgroundColor: colour.markerSurface,
+    opacity: 0.78,
+  },
+  /**
+   * `:focus-visible { opacity: 1; border-color: #8a303b; background: #30070be8;
+   * color: #fff; box-shadow: 0 0 0 1px var(--focus) }`, the shadow ring
+   * drawn as the border.
+   */
+  closeFocused: {
+    opacity: 1,
+    borderColor: colour.focus,
+    backgroundColor: 'rgba(48,7,11,0.910)',
+  },
+  closeGlyph: {
+    color: '#dedee2',
+    fontSize: rem(1.25),
+    lineHeight: lineHeightPx(rem(1.25)),
+  },
+  closeGlyphFocused: {
+    color: '#ffffff',
+  },
+  // `.media-card { flex: 0 0 clamp(145px, 13vw, 225px); border-radius: .75rem; padding: .35rem }`
+  card: {
+    width: layout.mediaCardWidth,
+    padding: rem(0.35),
+    borderRadius: radius.card,
+    backgroundColor: 'transparent',
+  },
+  // Unavailable: on the artwork and text, not the card, so the marker keeps its colour.
+  greyed: {
+    opacity: 0.4,
+  },
+  // `.media-card:focus-visible { transform: scale(1.04); background: var(--accent-focus-wash) }`
+  cardFocused: {
+    backgroundColor: colour.accentFocusWash,
+    transform: `scale(${focusFrame.scale})`,
+  },
+  // `.poster { aspect-ratio: 2/3; border-radius: .55rem; background: var(--surface-2) }`
+  poster: {
+    width: '100%',
+    height: POSTER_WIDTH * 1.5,
+    borderRadius: radius.poster,
+    overflow: 'hidden',
+    // The fill is on the artwork and placeholder; here it would show in the
+    // padding as a grey frame.
+    backgroundColor: 'transparent',
+    // `outline: 1px solid var(--focus); outline-offset: 1px`, thickened to
+    // be seen at ten feet. Always present, so focus changes only the colour
+    // and the rectangles the scorer reads do not move.
+    borderWidth: focusFrame.border,
+    borderStyle: 'solid',
+    padding: focusFrame.gap,
+    borderColor: 'transparent',
+  },
+  /** `.music-artwork { aspect-ratio: 1 }`: albums, artists and tracks. */
+  posterSquare: {
+    height: POSTER_WIDTH,
+  },
+  /**
+   * `.search-results .music-artwork { margin-top: 25%; margin-bottom: 25% }`,
+   * as a 2:3 box centring the square.
+   */
+  posterSlot: {
+    width: '100%',
+    height: POSTER_WIDTH * 1.5,
+    justifyContent: 'center',
+  },
+  fill: {
+    width: '100%',
+    height: '100%',
+  },
+  posterFocused: {
+    borderColor: colour.focus,
+  },
+  image: {
+    width: '100%',
+    height: '100%',
+    borderRadius: radius.poster,
+    backgroundColor: colour.surface2,
+  },
+  placeholder: {
+    width: '100%',
+    height: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: radius.poster,
+    backgroundColor: colour.surface2,
+  },
+  // `.poster-placeholder { font-size: 4rem; font-weight: 700; color: #ffffff16 }`
+  placeholderGlyph: {
+    fontSize: rem(4),
+    fontWeight: font.weightBold,
+    color: colour.placeholderGlyph,
+  },
+  // `.card-title { margin-top: .65rem; font-weight: 600; color: #dcdce0 }`
+  title: {
+    marginTop: rem(0.65),
+    fontWeight: font.weightSemibold,
+    color: colour.cardTitle,
+    fontSize: type.body,
+  },
+  // `.card-subtitle { margin-top: .15rem; color: var(--text-dim); font-size: .85rem }`
+  subtitle: {
+    marginTop: rem(0.15),
+    color: colour.textDim,
+    fontSize: type.cardSubtitle,
+  },
+  // `.progress-track { left/right/bottom: .4rem; height: 4px; border-radius: 99px; background: #000b }`
+  progressTrack: {
+    position: 'absolute',
+    left: rem(0.4),
+    right: rem(0.4),
+    bottom: rem(0.4),
+    height: px(4),
+    borderRadius: radius.pill,
+    backgroundColor: colour.scrim,
+    overflow: 'hidden',
+  },
+  // `.progress-value { background: var(--red-400) }`
+  progressValue: {
+    height: '100%',
+    backgroundColor: colour.red400,
+  },
+} satisfies Record<string, Style>;

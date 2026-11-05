@@ -1,7 +1,119 @@
-@import './styles/base.css';
-@import './styles/lists.css';
-@import './styles/settings.css';
-@import './styles/metadata.css';
-@import './styles/manage.css';
-@import './styles/ingest.css';
-@import './styles/status.css';
+/*
+ * The page, and the two boxes every screen is built from. Everything else is
+ * stated inline from `styles/theme.ts`, as the Android TV client states it from
+ * `StyleSheet.create`. Chromium 47 (Tizen 3): no custom properties, grid, flex
+ * gap, aspect-ratio, inset or 8-digit hex colours anywhere in this client.
+ */
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: #0e0e0f;
+  color: #e2e2e5;
+  font-family: Roboto, sans-serif;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+#root {
+  display: flex;
+  flex-direction: column;
+}
+
+/* React Native's View: a flex column whose items neither shrink nor keep a minimum size. */
+.view {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  flex-shrink: 0;
+}
+
+/* React Native's Text. */
+.text {
+  display: block;
+  position: relative;
+  min-width: 0;
+  flex-shrink: 0;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+/* `numberOfLines={1}`. */
+.text-1 {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* `numberOfLines={n}`; the count is inline. */
+.text-n {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* A vertical ScrollView fills its column; the page follows focus, so nothing scrolls by itself. */
+.scroller {
+  flex: 1 1 0%;
+  overflow: hidden;
+}
+
+/* A horizontal ScrollView: its content box is as wide as its cards. */
+.scroller-horizontal {
+  flex: 0 0 auto;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.scroller-horizontal > .view {
+  display: inline-flex;
+  flex-direction: row;
+  vertical-align: top;
+}
+
+img {
+  display: block;
+}
+
+/* A text field is only its text; `TvTextInput` draws the box. */
+input {
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  outline: 0;
+  margin: 0;
+  padding: 0;
+  width: 100%;
+}
+
+input::-webkit-input-placeholder {
+  color: #77777f;
+}
+
+/* The one animation: a still spinner reads as a hung app. */
+.spinner {
+  border-radius: 50%;
+  border: 3px solid transparent;
+  border-top-color: currentColor;
+  animation: macha-spin 700ms linear infinite;
+}
+
+@keyframes macha-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

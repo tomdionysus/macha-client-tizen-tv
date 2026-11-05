@@ -1,218 +1,339 @@
-import { qualityLabel } from '@machafoundation/core';
+import { createContext, useContext } from 'react';
+import { css, ScrollView, Text, View, type Style } from '../../components/primitives';
 import type {
   OfferedMode,
-  PlaybackDecisionReason,
-  PlaybackInstructionReport,
+  PlaybackMode,
   PlaybackPreferencesUpdate,
   PlaybackSession,
-  PlaybackStreamInfo,
+  PlaybackInstructionReport,
   PlaybackUpdate,
   PlaybackVersions,
   VersionStep,
 } from '@machafoundation/core';
-import type { PlaybackCapabilities, PlaybackMode } from '@machafoundation/core';
-import { useEffect, useRef } from 'react';
-import type { PlayerNodeChoice } from './nodeChoices';
-import { modeRequest } from './modeTransforms';
-
-function streamLabel(stream: PlaybackStreamInfo, fallback: string): string {
-  const parts = [stream.language ? stream.language.toUpperCase() : fallback, stream.codec.toUpperCase()];
-  if (stream.channels) parts.push(`${stream.channels}ch`);
-  if (stream.forced) parts.push('forced');
-  return parts.join(' · ');
-}
-
-const REASON_TEXT: Record<PlaybackDecisionReason, string> = {
-  'source-plays-as-is': 'this device plays the file as it is',
-  'container-not-playable': 'this device cannot play the container',
-  'video-codec-not-playable': 'this device cannot decode the video',
-  'video-codec-not-deliverable-over-hls': 'the video cannot be delivered over HLS here',
-  'video-bit-depth-exceeds-client': 'the video is deeper than this device decodes',
-  'video-size-exceeds-client': 'the picture is larger than this device plays',
-  'video-transfer-not-presentable': 'this device cannot present the colour transfer',
-  'video-dolby-vision-not-supported': 'this device does not support this Dolby Vision profile',
-  'audio-codec-not-playable': 'this device cannot decode the audio',
-  'audio-codec-not-deliverable-over-hls': 'the audio cannot be delivered over HLS here',
-  'host-policy-forbids-direct': 'this device is not trusted to play files directly',
-  'host-policy-excludes-container': 'this device is not trusted with the container',
-  'host-policy-excludes-codec': 'this device is not trusted with the codec',
-  'host-policy-prefers-container': 'this device is served a segment format it handles better',
-  'no-technical-facts': 'the server did not report what this file is',
-  'executor-refused-copy': 'this server refused to copy the streams',
-  'executor-cannot-direct': 'this server cannot serve the file directly',
-  'executor-cannot-copy-video': 'this server cannot repackage the video',
-  'executor-cannot-copy-audio': 'this server cannot repackage the audio',
-  'player-could-not-decode': 'this device could not decode the copied streams',
-  'transcode-below-real-time': 'the server cannot convert this picture fast enough to play',
-};
-
-/** Why the facts lookup failed, in one clause. `factsError` is whatever the supplier threw, so no shape is assumed; absent means no supplier, not a fault. */
-function describeFactsError(cause: unknown): string | undefined {
-  if (cause === undefined || cause === null) return undefined;
-  const message = cause instanceof Error ? cause.message : String(cause);
-  const trimmed = message.trim();
-  return trimmed.length > 0 ? trimmed.replace(/\.$/, '') : undefined;
-}
+import { Focusable } from '../../components/Focusable';
+import { colour, focusFrame, lineHeightPx, px, radius, rem, type, vh } from '../../styles/theme';
+import { qualityChoiceText, qualityLabel } from '../../text/viewerText';
+import {
+  assumptionNote,
+  audioProcessingNote,
+  instructionNote,
+  MODE_LABELS,
+  modeChoices,
+  modeObjectionNote,
+  noteIsWarning,
+  qualityChoices,
+  streamLabel,
+} from './playbackOptions';
 
 /**
- * Why this stream is served the way it is. A failed facts lookup falls back to
- * transcode, which plays, so this note is the only place that failure shows.
+ * Playback options: mode, quality, audio, subtitles. The web client's
+ * `PlayerOptions` as D-pad rows, with the rules in `playbackOptions.ts`. The
+ * panel takes its own focus scope, so the transport is unreachable while open.
  */
-function instructionNote(instruction: PlaybackInstructionReport | undefined): string | undefined {
-  if (!instruction) return undefined;
-  if (instruction.chosenByViewer) return 'Chosen by you.';
-  if (instruction.withoutFacts) {
-    // Say why nothing could be read, so the viewer can tell a broken file from a busy node.
-    const cause = describeFactsError(instruction.factsError);
-    return cause
-      ? `Chosen without facts: transcoding because this file's details could not be read: ${cause}`
-      : 'Chosen without facts: transcoding because nothing could be reasoned from.';
-  }
-  const reasons = instruction.reasons.map((reason) => REASON_TEXT[reason] ?? reason);
-  return reasons.length > 0 ? `Chosen automatically: ${reasons.join('; ')}.` : 'Chosen automatically.';
-}
+export const OPTIONS_SCOPE = 'player-options';
 
-/** Inputs nobody supplied to the chooser. This client intends to wire them all, so any listed is a defect. */
-function assumptionNote(instruction: PlaybackInstructionReport | undefined): string | undefined {
-  if (!instruction || instruction.chosenByViewer || instruction.assumed.length === 0) return undefined;
-  return `Decided without: ${instruction.assumed.join(', ')}.`;
-}
+/**
+ * Down from the last group leaves the panel for the transport. Context, not a
+ * prop: only the last group's options get it, and which group is last varies.
+ */
+const ExitDown = createContext<(() => void) | undefined>(undefined);
 
-export function PlayerOptions({ session, pendingPreferences, instruction, capabilities, versions, offered, nodes = [], movingToNode, onApply, onPlayVersion, onSelectNode }: {
+export function PlayerOptions({
+  session,
+  pendingPreferences,
+  instruction,
+  versions,
+  offeredModes,
+  onApply,
+  onPlayVersion,
+  onDismiss,
+}: {
   session: PlaybackSession;
-  /**
-  /**
-   * Core's `offeredModes`. A mode not offered is hidden; one offered only because
-   * the viewer asked for everything says why the device objects. Absent shows every mode the node allows.
-   */
-  offered?: readonly OfferedMode[];
-  /** The item's qualities, as on its detail page; see core's `snapshot.versions`. */
-  versions?: PlaybackVersions;
-  onPlayVersion?: (step: VersionStep) => void;
-  /** What this device decodes, which decides what remux may copy. */
-  capabilities?: PlaybackCapabilities;
   pendingPreferences?: PlaybackPreferencesUpdate;
   instruction?: PlaybackInstructionReport;
-  /** Every node this client knows, in display order. */
-  nodes?: readonly PlayerNodeChoice[];
-  /** The node a move is in flight to. */
-  movingToNode?: string;
+  versions?: PlaybackVersions;
+  /** Core's verdict per mode for the file playing; undefined without facts. */
+  offeredModes?: readonly OfferedMode[];
   onApply: (update: PlaybackUpdate) => void;
-  onSelectNode?: (nodeId: string) => void;
-}) {
-  const effectivePreferences = { ...session.preferences, ...pendingPreferences };
+  onPlayVersion: (step: VersionStep) => void;
+  /** Called on Down from the last row. */
+  onDismiss: () => void;
+}): React.JSX.Element {
+  const qualityRow = qualityChoices(
+    versions?.steps ?? [],
+    session.options.qualityHeights,
+    session.options.canChangeQuality,
+  );
+  const hasQuality = qualityRow.length > 0;
+  const hasAudio = session.options.audioStreams.length > 0;
+  const hasSubtitles = session.options.subtitleStreams.length > 0;
+  const lastGroup = hasSubtitles
+    ? 'subtitles'
+    : hasAudio
+      ? 'audio'
+      : hasQuality
+        ? 'quality'
+        : 'mode';
+
+  const effective = { ...session.preferences, ...pendingPreferences };
   const selectedAudio = pendingPreferences?.audioStream ?? session.selected.audioStream;
   const selectedSubtitle = pendingPreferences?.subtitleStream === null
     ? -1
     : pendingPreferences?.subtitleStream ?? session.selected.subtitleStream;
-  // `'choose'` (Auto) is a core sentinel that never reaches the wire: the
-  // coordinator re-runs the chooser and sends a concrete mode. A concrete mode
-  // press states the whole transform (`modeRequest`), because naming only the
-  // mode leaves the session's per-stream transforms in place and the server
-  // refuses the contradiction.
-  const audioCodec = session.options.audioStreams.find((stream) => stream.index === selectedAudio)?.codec
-    ?? session.output.audio?.codec;
-  const mode = (value: PlaybackMode | 'choose') => onApply({
-    preferences: value === 'choose' ? { mode: value } : modeRequest(value, audioCodec, capabilities),
-  });
-  const chosenByViewer = effectivePreferences.mode !== undefined && effectivePreferences.mode !== 'choose';
-  // Keeps the active node in view in a long list.
-  const activeNodeRef = useRef<HTMLButtonElement | null>(null);
-  useEffect(() => {
-    activeNodeRef.current?.scrollIntoView?.({ block: 'nearest' });
-  }, [nodes]);
-  const preferences = (update: PlaybackPreferencesUpdate) => onApply({ preferences: update });
+
+  /**
+   * `'choose'` is core's sentinel for Auto and never reaches the wire: the
+   * coordinator re-runs the chooser and sends a concrete mode. Sent on every
+   * press, since an absent mode changes nothing. The mode is sent alone:
+   * naming it clears the stream transforms and quality caps server-side.
+   */
+  const applyMode = (value: PlaybackMode | 'choose') => onApply({ preferences: { mode: value } });
+  const chosenByViewer = effective.mode !== undefined && effective.mode !== 'choose';
+  const applyPreferences = (update: PlaybackPreferencesUpdate) => onApply({ preferences: update });
+
+  const modes = modeChoices(session.options.modes, offeredModes);
+  const objections = modeObjectionNote(modes);
+  const note = instructionNote(instruction);
+  const assumed = assumptionNote(instruction);
 
   return (
-    <div className="player-options" aria-label="Playback options">
-      <div className="player-options-controls">
-      <div className="player-option-group">
-        <span>Mode</span>
-        <div>
-          <button type="button" data-tv-focusable="true" className={chosenByViewer ? undefined : 'selected'} onClick={() => mode('choose')}>Auto</button>
-          {session.options.modes.map((candidate) => {
-            const offer = offered?.find((entry) => entry.mode === candidate);
-            if (offer && !offer.offered) return null;
-            const objection = offer && offer.reasons.length > 0
-              ? `This device may not play this: ${offer.reasons.map((reason) => REASON_TEXT[reason] ?? reason).join('; ')}.`
-              : undefined;
-            return (
-              <button type="button" key={candidate} data-tv-focusable="true" className={effectivePreferences.mode === candidate ? 'selected' : undefined} title={objection} onClick={() => mode(candidate)}>
-                {candidate === 'direct' ? 'Direct' : candidate === 'remux' ? 'Remux' : 'Transcode'}
-              </button>
-            );
-          })}
-        </div>
-        {instructionNote(instruction) && <small className={instruction?.withoutFacts ? 'player-option-note player-option-warning' : 'player-option-note'}>
-          {instructionNote(instruction)}
-        </small>}
-        {assumptionNote(instruction) && <small className="player-option-note player-option-warning">
-          {assumptionNote(instruction)}
-        </small>}
-      </div>
+    <ScrollView style={styles.panel} contentStyle={styles.groups}>
+      <Group label="Mode" exitDown={lastGroup === 'mode' ? onDismiss : undefined} first>
+        <Option label="Auto" selected={!chosenByViewer} onSelect={() => applyMode('choose')} defaultFocus />
+        {modes.map(({ mode: candidate }) => (
+          <Option
+            key={candidate}
+            label={MODE_LABELS[candidate] ?? candidate}
+            selected={effective.mode === candidate}
+            onSelect={() => applyMode(candidate)}
+          />
+        ))}
+      </Group>
 
-      {versions && versions.steps.length > 0 && onPlayVersion ? <div className="player-option-group">
-        <span>Quality</span>
-        <div>
-          {versions.steps.map((step) => <button type="button" key={step.quality} data-tv-focusable="true" className={instruction?.quality === step.quality ? 'selected' : undefined} onClick={() => onPlayVersion(step)}>{qualityLabel(step.quality)}</button>)}
-        </div>
-      </div> : session.options.canChangeQuality && <div className="player-option-group">
-        <span>Quality</span>
-        <div>
-          <button type="button" data-tv-focusable="true" className={effectivePreferences.maxHeight === null && effectivePreferences.maxBitrate === null ? 'selected' : undefined} onClick={() => preferences({ maxHeight: null, maxBitrate: null })}>Original</button>
-          {session.options.qualityHeights.map((height) => <button type="button" key={height} data-tv-focusable="true" className={effectivePreferences.maxHeight === height ? 'selected' : undefined} onClick={() => preferences({ maxHeight: height })}>{height}p</button>)}
-        </div>
-      </div>}
+      {objections ? <Note text={objections} warning /> : null}
 
-      {session.options.audioStreams.length > 0 && <div className="player-option-group">
-        <span>Audio</span>
-        <div>{session.options.audioStreams.map((stream) => <button type="button" key={stream.index} data-tv-focusable="true" className={selectedAudio === stream.index ? 'selected' : undefined} onClick={() => preferences({ audioStream: stream.index, audioLanguage: '' })}>{streamLabel(stream, `Audio ${stream.index}`)}</button>)}</div>
-        <small className="player-option-note">
-          {session.transform.audio === 'transcode'
-            ? `Server processing: transcode${session.output.audio?.codec ? ` → ${session.output.audio.codec.toUpperCase()}` : ''}`
-            : session.transform.audio === 'copy' ? 'Server processing: copy' : 'Server processing: omitted'}
-        </small>
-      </div>}
+      {note ? <Note text={note} warning={noteIsWarning(instruction)} /> : null}
+      {assumed ? <Note text={assumed} warning /> : null}
 
-      {session.options.subtitleStreams.length > 0 && <div className="player-option-group">
-        <span>Subtitles</span>
-        <div>
-          <button type="button" data-tv-focusable="true" className={selectedSubtitle < 0 ? 'selected' : undefined} onClick={() => preferences({ subtitleStream: null, subtitleLanguage: '' })}>Off</button>
-          {session.options.subtitleStreams.map((stream) => <button type="button" key={stream.index} data-tv-focusable="true" className={selectedSubtitle === stream.index ? 'selected' : undefined} onClick={() => preferences({ subtitleStream: stream.index, subtitleLanguage: '' })}>{streamLabel(stream, `Subtitle ${stream.index}`)}</button>)}
-        </div>
-      </div>}
+      {/* The item's versions, then any smaller cap the node offers. */}
+      {hasQuality ? (
+        <>
+          <Group label="Quality" exitDown={lastGroup === 'quality' ? onDismiss : undefined}>
+            {qualityRow.map((choice) =>
+              choice.kind === 'version' ? (
+                <Option
+                  key={`v${choice.step.quality}`}
+                  label={qualityLabel(choice.step.quality)}
+                  selected={instruction?.quality === choice.step.quality}
+                  onSelect={() => onPlayVersion(choice.step)}
+                />
+              ) : choice.kind === 'cap' ? (
+                <Option
+                  key={`c${choice.height}`}
+                  label={`${choice.height}p`}
+                  selected={effective.maxHeight === choice.height}
+                  onSelect={() => applyPreferences({ maxHeight: choice.height })}
+                />
+              ) : (
+                <Option
+                  key="original"
+                  label="Original"
+                  selected={effective.maxHeight === null && effective.maxBitrate === null}
+                  onSelect={() => applyPreferences({ maxHeight: null, maxBitrate: null })}
+                />
+              ),
+            )}
+          </Group>
+          {versions && !instruction?.chosenByViewer && qualityChoiceText(versions) ? (
+            <Note text={qualityChoiceText(versions)!} />
+          ) : null}
+        </>
+      ) : null}
 
-      {session.options.canSwitchMedia && session.options.mediaIds.length > 1 && <div className="player-option-group">
-        <span>Source</span>
-        <div>{session.options.mediaIds.map((mediaId, index) => <button type="button" key={mediaId} data-tv-focusable="true" className={session.mediaId === mediaId ? 'selected' : undefined} title={mediaId} onClick={() => onApply({ mediaId })}>Source {index + 1}</button>)}</div>
-      </div>}
-      </div>
+      {session.options.audioStreams.length > 0 ? (
+        <>
+          <Group label="Audio" exitDown={lastGroup === 'audio' ? onDismiss : undefined}>
+            {session.options.audioStreams.map((stream) => (
+              <Option
+                key={stream.index}
+                label={streamLabel(stream, `Audio ${stream.index}`)}
+                selected={selectedAudio === stream.index}
+                onSelect={() => applyPreferences({ audioStream: stream.index, audioLanguage: '' })}
+              />
+            ))}
+          </Group>
+          <Note text={audioProcessingNote(session.transform.audio, session.output.audio?.codec)} />
+        </>
+      ) : null}
 
-      {/* On the right, where the title bar already names the node: this changes which node sends, not what is sent. */}
-      {onSelectNode && nodes.length > 1 && <div className="player-option-group player-option-group-node">
-        <span>Node</span>
-        <div>
-          {nodes.map((node) => (
-            <button
-              type="button"
-              key={node.id}
-              ref={node.active ? activeNodeRef : undefined}
-              data-tv-focusable="true"
-              className={node.active ? 'selected' : undefined}
-              title={node.detail}
-              disabled={node.active || node.id === movingToNode}
-              onClick={() => onSelectNode(node.id)}
-            >
-              {node.label}
-            </button>
+      {session.options.subtitleStreams.length > 0 ? (
+        <Group label="Subtitles" exitDown={lastGroup === 'subtitles' ? onDismiss : undefined}>
+          <Option
+            label="Off"
+            selected={selectedSubtitle < 0}
+            onSelect={() => applyPreferences({ subtitleStream: null, subtitleLanguage: '' })}
+          />
+          {session.options.subtitleStreams.map((stream) => (
+            <Option
+              key={stream.index}
+              label={streamLabel(stream, `Subtitle ${stream.index}`)}
+              selected={selectedSubtitle === stream.index}
+              onSelect={() => applyPreferences({ subtitleStream: stream.index, subtitleLanguage: '' })}
+            />
           ))}
-        </div>
-        <small className="player-option-note">
-          {movingToNode
-            ? 'Moving this stream to the node you picked, from where you are now…'
-            : 'Plays from the node you pick, at the position you are at. Recovery still moves you off a node that fails.'}
-        </small>
-      </div>}
-    </div>
+        </Group>
+      ) : null}
+    </ScrollView>
   );
 }
+
+function Group({
+  label,
+  children,
+  exitDown,
+  first,
+}: {
+  label: string;
+  children: React.ReactNode;
+  exitDown?: () => void;
+  first?: boolean;
+}): React.JSX.Element {
+  return (
+    <View style={css(styles.group, !first && styles.groupAfterFirst)}>
+      <Text style={styles.groupLabel}>{label}</Text>
+      <View style={styles.groupOptions}>
+        <ExitDown.Provider value={exitDown}>{children}</ExitDown.Provider>
+      </View>
+    </View>
+  );
+}
+
+function Option({
+  label,
+  selected,
+  onSelect,
+  defaultFocus,
+}: {
+  label: string;
+  selected: boolean;
+  onSelect: () => void;
+  defaultFocus?: boolean;
+}): React.JSX.Element {
+  const exitDown = useContext(ExitDown);
+
+  return (
+    <Focusable
+      ring={false}
+      scope={OPTIONS_SCOPE}
+      defaultFocus={defaultFocus}
+      onSelect={onSelect}
+      // Only the last group's options claim Down; elsewhere it is the scorer's.
+      ownsDirection={exitDown ? (direction) => direction === 'down' : undefined}
+      onDirection={exitDown ? (direction) => direction === 'down' && exitDown() : undefined}
+      style={css(styles.option, selected && styles.optionSelected)}
+      focusedStyle={styles.optionFocused}
+    >
+      {({ focused }) => (
+        <Text style={css(styles.optionLabel, (selected || focused) && styles.optionLabelActive)}>
+          {label}
+        </Text>
+      )}
+    </Focusable>
+  );
+}
+
+function Note({ text, warning }: { text: string; warning?: boolean }): React.JSX.Element {
+  return <Text style={css(styles.note, warning && styles.noteWarning)}>{text}</Text>;
+}
+
+const styles = {
+  /**
+   * `.player-options { display: grid; gap: .65rem; max-height: min(34vh, 320px);
+   * margin: 0 0 1rem; padding: .8rem 0 .2rem; overflow-y: auto }`
+   */
+  panel: {
+    flex: '0 0 auto',
+    maxHeight: Math.min(vh(34), px(320)),
+    marginBottom: rem(1),
+    paddingTop: rem(0.8),
+    paddingBottom: rem(0.2),
+  },
+  groups: {},
+  /** `.player-option-group { grid-template-columns: 6.5rem 1fr; gap: .8rem }` */
+  group: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+  },
+  /** The panel's `gap: .65rem`. */
+  groupAfterFirst: {
+    marginTop: rem(0.65),
+  },
+  /**
+   * `.player-option-group > span { padding-top: .45rem; color: var(--text-faint);
+   * font-size: .78rem; text-transform: uppercase; letter-spacing: .08em }`
+   */
+  groupLabel: {
+    width: rem(6.5),
+    paddingTop: rem(0.45),
+    color: colour.textFaint,
+    fontSize: type.eyebrow,
+    letterSpacing: type.eyebrow * 0.08,
+    textTransform: 'uppercase',
+  },
+  /** `.player-option-group > div { display: flex; flex-wrap: wrap; gap: .4rem }`, after the group's `.8rem`. */
+  groupOptions: {
+    flex: 1,
+    marginLeft: rem(0.8),
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+  },
+  /**
+   * `.player-option-group button { border: 1px solid #3a3a40; border-radius: 999px;
+   * padding: .42rem .7rem; background: #09090ab8; color: #bcbcc2; font-size: .82rem }`
+   */
+  option: {
+    marginRight: rem(0.4),
+    marginBottom: rem(0.4),
+    paddingLeft: rem(0.7),
+    paddingRight: rem(0.7),
+    paddingTop: rem(0.42),
+    paddingBottom: rem(0.42),
+    borderRadius: radius.pill,
+    // `focusFrame.border`, not base.css's 1px, which is unreadable from the
+    // sofa (measured on the TCL set). Always present, so focus moves nothing.
+    borderWidth: focusFrame.border,
+    borderStyle: 'solid',
+    borderColor: colour.inputBorder,
+    backgroundColor: colour.optionSurface,
+  },
+  /**
+   * `:hover, :focus-visible, .selected { border-color: var(--focus);
+   * background: var(--accent-surface-strong); color: #dedee2 }`
+   * Split here: the fill carries selection only, the border focus only.
+   */
+  optionSelected: {
+    backgroundColor: colour.accentSurfaceStrong,
+  },
+  optionFocused: {
+    borderColor: colour.focus,
+  },
+  optionLabel: {
+    color: colour.optionText,
+    fontSize: type.small,
+  },
+  optionLabelActive: {
+    color: colour.heading,
+  },
+  /** `.player-option-note { grid-column: 2; color: var(--text-faint); font-size: .75rem }` */
+  note: {
+    marginTop: rem(0.65),
+    marginLeft: rem(7.3),
+    color: colour.textFaint,
+    fontSize: type.faint,
+    lineHeight: lineHeightPx(type.faint * 1.35),
+  },
+  /** The only on-screen signal that the chooser fell back or lacked facts. */
+  noteWarning: {
+    color: colour.text,
+  },
+} satisfies Record<string, Style>;

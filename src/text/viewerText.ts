@@ -1,10 +1,5 @@
-import { MachaNoReachableEndpointError, mutationOutcomeUnknown,
-  acquisitionError,
-  CHOICE_NOT_AVAILABLE_CODE,
-  CHOICE_REQUIRED_CODE,
-  MachaPlaybackError,
+import {
   MachaClusterRouteError,
-  MachaEndpointError,
   MachaConnectionError,
   NOT_PLAYABLE_CODE,
   REGENERATION_ENDPOINT_GONE_CODE,
@@ -13,114 +8,33 @@ import { MachaNoReachableEndpointError, mutationOutcomeUnknown,
   TOO_SLOW_TO_PLAY_CODE,
   playbackFailureCode,
   playbackFailureDetail,
-  qualityLabel,
-  startupPhase,
-  type CatalogueHintResult,
-  type ClusterStartupStatus,
+  playbackFailureStatus,
+  SessionAuthError,
   type MediaSortKey,
   type MediaSummary,
   type MusicHierarchyContext,
+  type PlaybackMode,
   type PlaybackNotice,
-  type PlaybackRefusal,
-  type PlaybackVersions,
   type PlaybackStartProgress,
   type PlaybackStatusDescription,
+  type PlaybackStreamInfo,
+  qualityLabel,
+  type PlaybackVersions,
+  type ClusterNodeStatus,
   type QualityCeiling,
+  type TechnicalSummary,
   type QualityClass,
   type SearchCategoryKey,
-  type StartupSubsystem,
-  type TorrentJobErrorCode,
-  type UpnpErrorCode,
+  type ServerStatus,
+  type CatalogueStatus,
 } from '@machafoundation/core';
 
 /**
- * Every word this client shows a viewer about the media and the player.
- * Core supplies structured facts and codes, never sentences.
+ * Every word this client shows a viewer, composed from core's data. Core
+ * carries numbers, keys, contexts and codes, never viewer text (AGENTS.md).
  */
 
-const pad = (value: number) => String(value).padStart(2, '0');
-
-/** "S01E04", or "Episode 4" with no season. For a list already inside its season. */
-export function episodeCode(item: Pick<MediaSummary, 'seasonNumber' | 'episodeNumber'>): string | undefined {
-  if (item.episodeNumber === undefined) return undefined;
-  return item.seasonNumber === undefined ? `Episode ${item.episodeNumber}` : `S${pad(item.seasonNumber)}E${pad(item.episodeNumber)}`;
-}
-
-/**
- * An episode's mark away from its season (search, Continue Watching): "S04E08", the season taken
- * from its context where the item lacks one.
- */
-export function episodeLabel(item: Pick<MediaSummary, 'seasonNumber' | 'episodeNumber' | 'playbackContext'>): string | undefined {
-  return episodeCode({ episodeNumber: item.episodeNumber, seasonNumber: item.playbackContext?.season.seasonNumber ?? item.seasonNumber });
-}
-
-export function seasonLabel(seasonNumber: number | undefined): string | undefined {
-  return seasonNumber === undefined ? undefined : `Season ${seasonNumber}`;
-}
-
-/** "Track 9", or "Disc 2 · Track 3" past the first disc. */
-export function trackNumberLabel(item: Pick<MediaSummary, 'discNumber' | 'trackNumber'>): string | undefined {
-  if (item.trackNumber === undefined) return undefined;
-  return item.discNumber !== undefined && item.discNumber > 1 ? `Disc ${item.discNumber} · Track ${item.trackNumber}` : `Track ${item.trackNumber}`;
-}
-
-/** "Album (1997)", or the title alone with no year and no brackets. */
-export function albumLabel(context: MusicHierarchyContext): string {
-  return context.album.year ? `${context.album.title} (${context.album.year})` : context.album.title;
-}
-
-/** A book's authors by name, in credited order: "A and B", "A, B and C". Unnamed authors are left out. */
-export function bookAuthorsText(item: Pick<MediaSummary, 'bookContext'>): string | undefined {
-  const names = (item.bookContext?.authors ?? []).map((author) => author.title).filter((name): name is string => Boolean(name));
-  if (names.length === 0) return undefined;
-  return names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
-}
-
-/** A book's place in a series: "Book 3", "Book 8.5". */
-export function bookNumberLabel(index: number | null | undefined): string | undefined {
-  return index == null ? undefined : `Book ${index}`;
-}
-
-/** A series named with a book's place in it: "A Series, book 3", or the name alone. */
-export function seriesPlaceText(series: string, index: number | null | undefined): string {
-  return index == null ? series : `${series}, book ${index}`;
-}
-
-const BOOK_FORMATS: Record<string, string> = {
-  'application/epub+zip': 'EPUB',
-  'application/pdf': 'PDF',
-  'application/x-mobipocket-ebook': 'MOBI',
-  'application/vnd.amazon.ebook': 'AZW3',
-  'application/x-fictionbook+xml': 'FB2',
-  'application/vnd.comicbook+zip': 'CBZ',
-};
-
-/** A book file's format, from the type the server gives it; undefined for a type it does not name. */
-export function bookFormatName(contentType: string | undefined): string | undefined {
-  return contentType ? BOOK_FORMATS[contentType.split(';')[0].trim().toLowerCase()] : undefined;
-}
-
-/**
- * An ordinary card's second line, telling this item from others of its name: a movie or show's
- * year, an episode's code, a season's series, an album's artist, a track's number.
- */
-export function cardSubtitle(item: MediaSummary): string | undefined {
-  switch (item.kind) {
-    case 'episode': return episodeCode(item);
-    case 'season': {
-      const series = item.playbackContext?.series.title;
-      const season = seasonLabel(item.seasonNumber);
-      return series && season ? `${series} · ${season}` : season;
-    }
-    case 'album': return item.musicContext?.artist?.title ?? (item.year !== undefined ? String(item.year) : undefined);
-    case 'track': return trackNumberLabel(item);
-    case 'artist': return undefined;
-    case 'book': return bookAuthorsText(item);
-    case 'author':
-    case 'series': return undefined;
-    default: return item.year !== undefined ? String(item.year) : undefined;
-  }
-}
+// ── Sort and search categories ────────────────────────────────────────────
 
 const SORT_LABELS: Record<MediaSortKey, string> = {
   relevance: 'Relevance',
@@ -129,7 +43,7 @@ const SORT_LABELS: Record<MediaSortKey, string> = {
   recent: 'Recently added',
 };
 
-/** A sort control has no separate heading; each option reads "Sort By <X>". */
+/** "Sort By Title". */
 export function sortChoiceLabel(key: MediaSortKey): string {
   return `Sort By ${SORT_LABELS[key]}`;
 }
@@ -141,372 +55,62 @@ const CATEGORY_LABELS: Record<SearchCategoryKey, string> = {
   books: 'Books',
 };
 
-export function searchCategoryLabel(key: SearchCategoryKey): string {
+export function categoryLabel(key: SearchCategoryKey): string {
   return CATEGORY_LABELS[key];
 }
 
-export function startupPhaseLabel(startup: ClusterStartupStatus): string {
-  switch (startupPhase(startup)) {
-    case 'ready': return 'Ready';
-    case 'recovering': return 'Recovering';
-    case 'failed': return 'Startup failed';
-    default: return 'Starting';
-  }
+// ── Media lines ────────────────────────────────────────────────────────────
+
+/** "Season 2" (the web client's `seasonLabel`). */
+export function seasonLabel(seasonNumber: number | undefined): string | undefined {
+  return seasonNumber === undefined ? undefined : `Season ${seasonNumber}`;
 }
 
-const SUBSYSTEM_LABELS: Record<StartupSubsystem['key'], string> = {
-  api: 'Status API',
-  control_plane: 'Cluster control',
-  data_storage: 'DATA storage',
-  control_storage: 'CONTROL storage',
-  cache: 'Cache',
-  retention: 'Retention',
-  metadata: 'Metadata',
-  services: 'Local services',
-};
-
-export function startupSubsystemLabel(key: StartupSubsystem['key']): string {
-  return SUBSYSTEM_LABELS[key];
+/** "S04E08", or "Episode 8" with no season (the web client's `episodeCode`). */
+export function episodeLabel(item: Pick<MediaSummary, 'seasonNumber' | 'episodeNumber'>): string | undefined {
+  const { seasonNumber, episodeNumber } = item;
+  if (typeof episodeNumber !== 'number') return undefined;
+  if (typeof seasonNumber !== 'number') return `Episode ${episodeNumber}`;
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `S${pad(seasonNumber)}E${pad(episodeNumber)}`;
 }
 
-/**
- * Words a server code. A known code gets this client's sentence; a `generic` one (something failed
- * underneath) gets that sentence and then the server's; an unknown or absent code (an older node)
- * shows the server's sentence.
- */
-function coded<C extends string>(words: Partial<Record<C, string>>, generic: ReadonlySet<string>, code: string | null | undefined, detail: string | null | undefined): string | undefined {
-  const sentence = code ? words[code as C] : undefined;
-  if (!sentence) return detail || undefined;
-  return generic.has(code as string) && detail ? `${sentence} ${detail}` : sentence;
+/** "Track 9", or "Disc 2 · Track 3" on any disc after the first. */
+export function trackNumberLabel(item: Pick<MediaSummary, 'discNumber' | 'trackNumber'>): string | undefined {
+  const { discNumber, trackNumber } = item;
+  if (typeof trackNumber !== 'number') return undefined;
+  return typeof discNumber === 'number' && discNumber > 1
+    ? `Disc ${discNumber} · Track ${trackNumber}`
+    : `Track ${trackNumber}`;
 }
 
-const JOB_ERRORS: Record<TorrentJobErrorCode, string> = {
-  source_unavailable: 'The source cannot be reached.',
-  source_not_regular: 'The source is not an ordinary file.',
-  source_scan_interrupted: 'Scanning the source was interrupted.',
-  source_changed_during_scan: 'The source changed while it was being scanned.',
-  source_disappeared: 'The source has gone.',
-  source_changed: 'The source changed while it was being copied.',
-  source_unreadable: 'The source cannot be read.',
-  source_seek_failed: 'The source could not be read in full.',
-  source_short_read: 'The source could not be read in full.',
-  source_is_symlink: 'The source is a symbolic link, and links are not imported.',
-  no_supported_media: 'No playable media was found in it.',
-  destination_parent_not_directory: 'Where it was to be stored is not a folder.',
-  partial_not_file: 'A half-copied file is in the way.',
-  destination_conflict: 'A file of that name is already stored there.',
-  namespace_short_write: 'The copy was cut short while it was written.',
-  size_mismatch: 'The copy is not the same size as the source.',
-  metadata_unavailable: 'The data it needs is on no node that is up right now.',
-  filesystem_error: 'A storage error stopped the import.',
-  import_failed: 'The import failed.',
-  restore_failed: 'The torrent could not be restored after a restart.',
-  ingest_missing: 'Its import has gone missing.',
-  ingest_cancelled: 'Its import was cancelled.',
-  torrent_error: 'The torrent reported an error.',
-  staging_full: 'Waiting for room in staging.',
-  staging_unavailable: 'The node\'s staging folder is missing. It carries on by itself when the folder is back.',
-  ingest_submit_failed: 'It could not be handed over for import.',
-  ingest_failed: 'Its import failed.',
-  torrent_failed: 'The download failed.',
-  duplicate_torrent: 'Another job already held this torrent, so this one was stopped. Remove it and add the torrent again if it is still wanted.',
-  torrent_fault: 'The download engine failed on this torrent. Remove it and add the torrent again.',
-  adopt_failed: 'No node could take this torrent over. Remove it and add the torrent again.',
-};
-const GENERIC_JOB_ERRORS = new Set(['filesystem_error', 'import_failed', 'torrent_error', 'torrent_failed', 'ingest_failed']);
-
-/** Why an import or torrent job failed or is blocked. Undefined when it has not. */
-export function jobErrorText(job: { error?: string | null; error_code?: string | null } | undefined): string | undefined {
-  return job ? coded(JOB_ERRORS, GENERIC_JOB_ERRORS, job.error_code, job.error) : undefined;
+/** "Harbourlight (1997)", or "Harbourlight" with no year. */
+export function albumLabel(context: MusicHierarchyContext): string {
+  const { title, year } = context.album;
+  return typeof year === 'number' && year > 0 ? `${title} (${year})` : title;
 }
 
-const HINT_RESULTS: Record<CatalogueHintResult, string> = {
-  matched: 'Matched',
-  outside_catalogue_roots: 'Outside the catalogue folders',
-  not_media_file: 'Not a media file',
-  no_media_candidate: 'Nothing recognisable',
-  no_provider_match: 'No match found',
-  already_stored: 'Already in the catalogue',
-  profile_prepared: 'Prepared',
-  media_not_live: 'Not live yet',
-  manual_existing_item: 'Matched by hand',
-  manual_metadata: 'Entered by hand',
-  path_not_yet_visible: 'Not visible yet; tried again with the next batch',
-};
-
-/** A snake_case code as words, for one this client has no sentence for: "no_match" reads "No match". */
-export function codeWords(code: string): string {
-  return code.replace(/_/g, ' ').replace(/^./, (first) => first.toUpperCase());
-}
-
-/** What catalogue matching made of a file. A result that is not a code (an older node sends a sentence) is shown as it is. */
-export function hintResultLabel(result: string): string {
-  if (result in HINT_RESULTS) return HINT_RESULTS[result as CatalogueHintResult];
-  return /^[a-z0-9]+(_[a-z0-9]+)*$/.test(result) ? codeWords(result) : result;
-}
-
-const DIAGNOSTIC_ERRORS: Record<UpnpErrorCode | 'lookup_failed' | 'recovery_failed' | 'rpc_failed', string> = {
-  igd_not_connected: 'The router\'s UPnP gateway is not connected.',
-  port_mapped_elsewhere: 'The router maps this port to another device.',
-  mapping_verification_failed: 'The router did not confirm the port mapping.',
-  add_mapping_failed: 'The router refused the port mapping.',
-  discovery_failed: 'No UPnP router was found.',
-  support_not_built: 'This server was built without UPnP.',
-  lookup_failed: 'The external address could not be looked up.',
-  recovery_failed: 'Recovery at startup failed.',
-  rpc_failed: 'The node did not answer.',
-};
-const NO_GENERIC = new Set<string>();
-
-/** A status diagnostic's error: UPnP, external address, startup, a node's reachability. */
-export function diagnosticErrorText(item: { error?: string | null; error_code?: string | null }): string | undefined {
-  return coded(DIAGNOSTIC_ERRORS, NO_GENERIC, item.error_code, item.error);
-}
-
-const PLACEMENT_REASONS: Record<string, string> = {
-  node_not_member: 'That node is not in this cluster.',
-  node_refused: 'That node refused the torrent.',
-  node_unreachable: 'That node cannot be reached.',
-  node_did_not_start: 'That node did not start the torrent.',
-  missing_uri: 'There was no magnet link to pass on.',
-  add_failed: 'That node could not add the torrent.',
-  node_not_torrent_capable: 'That node cannot run torrents.',
-  node_not_ingest_capable: 'That node cannot run imports until it is on server 0.91.1 or later.',
-};
-
-/** A second add of a torrent is refused while a node holds a job for it, in whatever state. */
-const TORRENT_ALREADY_ADDED_CODE = 'torrent_already_added';
-
-/**
- * A torrent another node would not take. Read through core's `acquisitionError`, since the cluster
- * router wraps the node's refusal as the cause of its own.
- */
-function placementText(caught: unknown): string | undefined {
-  const error = acquisitionError(caught);
-  if (!error) return undefined;
-  if (error.code === TORRENT_ALREADY_ADDED_CODE) return 'That torrent is already in the list. To download it again, remove its job first.';
-  if (error.code !== 'placement_failed' || !error.reason) return undefined;
-  return PLACEMENT_REASONS[error.reason] ?? JOB_ERRORS[error.reason as TorrentJobErrorCode];
-}
-
-/** The server's state on the settings card, where it says anything beyond ok. */
-export function serverStatusText(status: { code: string | null; detail: string | null } | undefined): string | undefined {
-  if (!status) return undefined;
-  if (status.detail) return status.detail;
-  return status.code && status.code !== 'ok' ? codeWords(status.code) : undefined;
-}
-
-/** Core has dropped the token, but the cluster could not be told. */
-export const PLAYLIST_TOO_LARGE_TEXT = 'The playlist is full, so those tracks were not added. Remove some to make room.';
-export const SIGN_OUT_UNCONFIRMED_TEXT = 'You are signed out on this device, but the server could not be reached to end the session, so it stays valid there until it expires.';
-
-export const INSECURE_FROM_SECURE_PAGE_TEXT = 'Every Macha server here has a plain http address, which a browser will not reach from this https page. Open the client over http, or give the servers https addresses.';
-export const SERVER_UNREACHABLE_TEXT = 'The Macha server cannot be reached. Check that the server is running and that the API address is correct.';
-
-/** Every node was tried and none answered within core's wait. Usually passing, so it says to try again first. */
-export const NO_NODE_ANSWERED_TEXT = 'No Macha server answered. Try again in a moment; if it keeps happening, check that the servers are running.';
-
-/** A node in good standing was still working when core's budget for the read ran out: slow, not gone. */
-export const SERVER_SLOW_TEXT = 'The server is taking too long to answer. Try again in a moment.';
-
-/** One node did not answer a change in time. A change is never retried on another node, and may still be running. */
-export const CHANGE_UNANSWERED_TEXT = 'The server did not answer in time. It may still finish: refresh in a minute before trying again.';
-
-/**
- * What a viewer is told about a thrown error; its `message` is core's log text and never shown.
- * In order: this client's sentence for a code core states, the server's own sentence, the
- * no-node-answered sentence, then `fallback`.
- */
-export function viewerErrorText(error: unknown, fallback = 'Something went wrong. Try again.'): string {
-  const placed = placementText(error);
-  if (placed) return placed;
-  const codeText = playbackFailureCodeText(playbackFailureCode(error));
-  if (codeText) return codeText;
-  const detail = playbackFailureDetail(error);
-  if (detail) return detail;
-  if (error instanceof MachaNoReachableEndpointError) return INSECURE_FROM_SECURE_PAGE_TEXT;
-  if (error instanceof MachaConnectionError) return SERVER_UNREACHABLE_TEXT;
-  if (error instanceof MachaClusterRouteError && error.slow) return SERVER_SLOW_TEXT;
-  if (error instanceof MachaClusterRouteError && error.unreachable) return NO_NODE_ANSWERED_TEXT;
-  // Only a timeout may have been done; a refused connection certainly was not.
-  if (mutationOutcomeUnknown(error)) return CHANGE_UNANSWERED_TEXT;
-  if (error instanceof MachaEndpointError && error.kind === 'transport') return SERVER_UNREACHABLE_TEXT;
-  return fallback;
-}
-
-const CHOICE_NAMES: Record<string, string> = {
-  audio_stream: 'audio track',
-  video_stream: 'video track',
-  subtitle_stream: 'subtitle track',
-  container: 'streaming format',
-};
-
-/** The node is at its transcode limit. The server's sentence is the operator's, so the viewer gets this client's. */
-const RESOURCE_LIMIT_CODE = 'resource_limit';
-
-/**
- * Why the node refused a playback change: a stream choice is worded from its code, anything else is
- * the server's sentence, and where nothing said why, it says so.
- */
-export function playbackRefusalText(error: unknown, refusal?: PlaybackRefusal): string {
-  const code = refusal?.code ?? (error instanceof MachaPlaybackError ? error.code : undefined);
-  if (code === RESOURCE_LIMIT_CODE) return 'This node is already converting as much as it can for other viewers. Try again shortly.';
-  const choice = refusal?.choice ?? (error instanceof MachaPlaybackError ? error.choice : undefined);
-  if (choice) {
-    const what = CHOICE_NAMES[choice] ?? choice.replace(/_/g, ' ');
-    if (code === CHOICE_NOT_AVAILABLE_CODE) return `The chosen ${what} is not in this file.`;
-    if (code === CHOICE_REQUIRED_CODE) return `This file has more than one ${what} and none was chosen.`;
-  }
-  return viewerErrorText(error, 'The node refused it without saying why.');
-}
-
-/** The player's passing notice for one of core's notice codes. */
-export function playbackNoticeText(notice: PlaybackNotice, quality?: QualityClass): string {
-  switch (notice.code) {
-    case 'quality-stepped-down': return qualitySteppedDownText(quality);
-    case 'copy-refused': return 'This node could not copy the original streams, so they are being converted.';
-    case 'decode-fallback': return 'Converting streams…';
-    case 'cannot-seek': return 'This stream cannot seek.';
-    case 'not-ready': return 'Playback is still loading.';
-    case 'instruction-failed': return `Could not start this way: ${playbackRefusalText(notice.error, notice.refusal)}`;
-    case 'subtitles-loading': return 'Loading subtitles…';
-    case 'update-failed': return `Playback settings were not changed: ${playbackRefusalText(notice.error, notice.refusal)}`;
-  }
-}
-
-/** The failure screen's sentence for a failure code core states, or undefined to use the server's sentence. */
-export function playbackFailureCodeText(code: string | undefined): string | undefined {
-  switch (code) {
-    case SESSION_PROVENANCE_UNKNOWN_CODE:
-    case REGENERATION_ENDPOINT_GONE_CODE:
-      return 'This stream is no longer available. Start it again.';
-    case NOT_PLAYABLE_CODE:
-      return 'This item cannot be played here.';
-    // Core's own code, with no server sentence behind it.
-    case START_NO_PROGRESS_CODE:
-      return 'The node stopped making progress starting this stream.';
-    case TOO_SLOW_TO_PLAY_CODE:
-      return tooSlowToPlayText();
-    // Worded here from the code: the server's message for it is a fixed "Provider unavailable".
-    case 'provider_unavailable':
-      return 'TMDB and MusicBrainz cannot be reached from the server right now. Try again in a minute.';
-    default:
-      return undefined;
-  }
-}
-
-/** The player's stream-status lines, e.g. "DIRECT · HEVC · 1920×1080 · 7.5 Mb/s". */
-const CONTAINER_LABELS: Record<string, string> = { fmp4: 'FMP4', mpegts: 'MPEG-TS' };
-
-function bitrateText(bitrate?: number): string {
-  if (!bitrate) return '';
-  return bitrate >= 1_000_000 ? `${(bitrate / 1_000_000).toFixed(1)} Mb/s` : `${Math.round(bitrate / 1000)} kb/s`;
-}
-
-function channelsText(channels?: number): string {
-  if (!channels) return '';
-  if (channels === 1) return 'mono';
-  if (channels === 2) return 'stereo';
-  if (channels === 6) return '5.1';
-  if (channels === 8) return '7.1';
-  return `${channels}ch`;
-}
-
-function sampleRateText(sampleRate?: number): string {
-  if (!sampleRate) return '';
-  return sampleRate >= 1_000 ? `${Number((sampleRate / 1_000).toFixed(1))} kHz` : `${sampleRate} Hz`;
-}
-
-function present(parts: Array<string | undefined>): string[] {
-  return parts.filter((part): part is string => Boolean(part));
-}
-
-function videoSourceParts(video: NonNullable<PlaybackStatusDescription['video']>): string[] {
-  const { source } = video;
-  return present([
-    source.codec.toUpperCase(),
-    source.width && source.height ? `${source.width}×${source.height}` : undefined,
-    bitrateText(source.bitrate || video.sourceBitrate),
-  ]);
-}
-
-function videoOutputParts(video: NonNullable<PlaybackStatusDescription['video']>): string[] {
-  const output = video.output;
-  if (!output) return [];
-  return present([
-    output.codec?.toUpperCase(),
-    output.width && output.height ? `${output.width}×${output.height}` : undefined,
-    bitrateText(output.bitrate ?? video.outputBitrate),
-  ]);
-}
-
-function audioParts(stream: { codec?: string; language?: string; channels?: number; sampleRate?: number; bitDepth?: number; bitrate?: number }, withLanguage: boolean): string[] {
-  return present([
-    withLanguage && stream.language ? stream.language.toUpperCase() : undefined,
-    stream.codec?.toUpperCase(),
-    channelsText(stream.channels),
-    sampleRateText(stream.sampleRate),
-    stream.bitDepth ? `${stream.bitDepth}-bit` : undefined,
-    bitrateText(stream.bitrate),
-  ]);
-}
-
-function transcoded(kind: 'VIDEO' | 'AUDIO', source: string[], output: string[]): string {
-  const described = [`${kind} TRANSCODE`, 'SOURCE', ...source].join(' · ');
-  return output.length ? `${described} → ${output.join(' · ')}` : described;
-}
-
-export interface StreamStatusText {
-  container?: string;
-  video?: string;
-  audio?: string;
-  subtitle?: string;
-}
-
-export function streamStatusText(description: PlaybackStatusDescription | undefined): StreamStatusText | undefined {
-  if (!description) return undefined;
-  const whole = description.delivery === 'direct' ? 'DIRECT' : description.delivery === 'remux' ? 'REMUX' : undefined;
-  const { video, audio, subtitle } = description;
+/** The lines under a track's artwork in the player (the web client's `TrackFacts`). */
+export function trackFacts(
+  track: Pick<MediaSummary, 'musicContext' | 'discNumber' | 'trackNumber'>,
+): { artist?: string; album?: string; track?: string } {
   return {
-    container: description.container ? CONTAINER_LABELS[description.container.toLowerCase()] ?? description.container.toUpperCase() : undefined,
-    video: video && (video.transform === 'transcode'
-      ? transcoded('VIDEO', videoSourceParts(video), videoOutputParts(video))
-      : [whole ?? 'VIDEO COPY', ...videoSourceParts(video)].join(' · ')),
-    audio: audio && (audio.transform === 'transcode'
-      ? transcoded('AUDIO', audioParts(audio.source, true), audio.output ? audioParts(audio.output, false) : [])
-      : [whole ?? 'AUDIO COPY', ...audioParts(audio.source, true)].join(' · ')),
-    subtitle: subtitle && ['SUBTITLES', subtitle.language ? subtitle.language.toUpperCase() : 'UND', subtitle.codec.toUpperCase(), ...(subtitle.forced ? ['FORCED'] : [])].join(' · '),
+    artist: track.musicContext?.artist?.title,
+    album: track.musicContext ? albumLabel(track.musicContext) : undefined,
+    track: trackNumberLabel(track),
   };
 }
 
-/** A whole percentage of `done` over `total`, when the node measured both. */
-function measuredPercent(done: number | undefined, total: number | undefined): number | undefined {
-  if (done === undefined || total === undefined || !Number.isFinite(done) || !Number.isFinite(total) || total <= 0) return undefined;
-  return Math.min(100, Math.max(0, Math.floor(done / total * 100)));
+/** "Bjarnö - Harbourlight (1997)": a track found by search. */
+export function trackSearchLine(context: MusicHierarchyContext): string {
+  const album = albumLabel(context);
+  return context.artist?.title ? `${context.artist.title} - ${album}` : album;
 }
 
-/**
- * What a start or a change is doing, from core's counters: the stage, and how far through it. Never
- * an estimate: an unreported counter shows no figure. `node` names where the work happens;
- * `standalone` ends an open stage with an ellipsis.
- */
-export function startProgressText(progress: PlaybackStartProgress, node?: string, standalone = false): string | undefined {
-  const on = node ? ` on ${node}` : '';
-  const change = progress.kind === 'change';
-  const words = progress.stage === 'planning' ? `${change ? 'Preparing new stream' : 'Preparing the stream'}${on}`
-    : progress.stage === 'preroll' ? `Finding the start point${change ? on : ''}`
-      : progress.stage === 'encoding' ? (change ? `Starting the new stream${on}` : 'Starting the stream')
-        : undefined;
-  if (!words) return undefined;
-  const percent = progress.stage === 'preroll' ? measuredPercent(progress.prerollDecodedMs, progress.prerollTotalMs)
-    : progress.stage === 'encoding' ? measuredPercent(progress.outputMediaMs, progress.firstFragmentMs)
-      : undefined;
-  if (percent !== undefined) return `${words}: ${percent}%`;
-  return standalone ? `${words}…` : words;
-}
+// ── Time ───────────────────────────────────────────────────────────────────
 
-/** The scrubber's clock: "1:23:45", or "4:05" under an hour; "0:00" for anything not a positive finite duration. */
-export function playbackTimeText(ms: number): string {
+/** "1:02:03", "4:05", "0:00": the player's clock. */
+export function formatPlaybackTime(ms: number): string {
   if (!Number.isFinite(ms) || ms <= 0) return '0:00';
   const total = Math.floor(ms / 1000);
   const hours = Math.floor(total / 3600);
@@ -515,14 +119,102 @@ export function playbackTimeText(ms: number): string {
   return hours > 0 ? `${hours}:${String(minutes).padStart(2, '0')}:${seconds}` : `${minutes}:${seconds}`;
 }
 
-/** The alphabet index's catch-all key reads "#". */
-export function alphabetIndexKeyText(key: string): string {
-  return key === 'other' ? '#' : key;
+// ── Player notices ─────────────────────────────────────────────────────────
+
+/** The line the player shows for one of core's notice codes. */
+export function playbackNoticeText(notice: PlaybackNotice, quality?: QualityClass): string {
+  switch (notice.code) {
+    // `quality` is the one now playing.
+    case 'quality-stepped-down':
+      return qualitySteppedDownText(quality);
+    case 'copy-refused':
+      return 'This node could not copy the original streams, so they are being converted.';
+    case 'decode-fallback':
+      return 'Converting streams…';
+    case 'cannot-seek':
+      return 'This stream cannot seek.';
+    case 'not-ready':
+      return 'Playback is still loading.';
+    case 'instruction-failed':
+      return 'Could not work out how to play this here.';
+    case 'subtitles-loading':
+      return 'Loading subtitles…';
+    case 'update-failed':
+      // The node's refusal code, where the viewer can act on it.
+      if (notice.refusal?.code === 'choice_not_available') {
+        return "That track isn't in this file, so nothing was changed.";
+      }
+      // 429: another viewer holds the node's transcode slot.
+      if (notice.refusal?.code === 'resource_limit') {
+        return "This server is converting for another viewer right now, so that change wasn't made.";
+      }
+      return 'That change could not be applied.';
+    default:
+      return '';
+  }
 }
 
-export function alphabetIndexKeyDescription(key: string): string {
-  return key === 'other' ? 'Titles beginning with a number or symbol' : `Titles beginning with ${key}`;
+// ── The player's spinner ───────────────────────────────────────────────────
+
+/** Under the spinner once a start runs long (the web client's sentence); a reported stage replaces the general words. */
+export function startWaitText(elapsedMs: number, stage?: string): string {
+  return `${stage ?? 'Waiting for the node to start the stream'} · ${Math.floor(elapsedMs / 1_000)}s`;
 }
+
+/** A whole percentage of `done` over `total`, when the node measured both. */
+function measuredPercent(done: number | undefined, total: number | undefined): number | undefined {
+  if (done === undefined || total === undefined || !Number.isFinite(done) || !Number.isFinite(total) || total <= 0) return undefined;
+  return Math.min(100, Math.max(0, Math.floor((done / total) * 100)));
+}
+
+/**
+ * What a start or a change is doing: the stage, and a percentage only when
+ * the node measured one. The web client's `startProgressText`
+ * (`macha-client/src/text/viewerText.ts`), word for word. A change names
+ * `node` throughout, a start only while planning; `standalone` ends an open
+ * stage with an ellipsis.
+ */
+export function startProgressText(progress: PlaybackStartProgress, node?: string, standalone = false): string | undefined {
+  const on = node ? ` on ${node}` : '';
+  const change = progress.kind === 'change';
+  const words =
+    progress.stage === 'planning' ? `${change ? 'Preparing new stream' : 'Preparing the stream'}${on}`
+    : progress.stage === 'preroll' ? `Finding the start point${change ? on : ''}`
+    : progress.stage === 'encoding' ? (change ? `Starting the new stream${on}` : 'Starting the stream')
+    : undefined;
+  if (!words) return undefined;
+  const percent =
+    progress.stage === 'preroll' ? measuredPercent(progress.prerollDecodedMs, progress.prerollTotalMs)
+    : progress.stage === 'encoding' ? measuredPercent(progress.outputMediaMs, progress.firstFragmentMs)
+    : undefined;
+  if (percent !== undefined) return `${words}: ${percent}%`;
+  return standalone ? `${words}…` : words;
+}
+
+/**
+ * The status line while a new stream is prepared behind the one playing: the
+ * web client's `preparingStreamText` (`macha-client/src/screens/PlayerScreen.tsx`).
+ * A change names its node, and a mode change the mode it switches to; a
+ * failover arrives as a start, whose `node` is the one being replaced, so it
+ * names none.
+ */
+export function preparingStreamText(
+  progress: PlaybackStartProgress | undefined,
+  node?: string,
+  mode?: PlaybackMode | 'choose',
+): string {
+  const staged = progress && startProgressText({ ...progress, kind: 'change' }, progress.kind === 'change' ? node : undefined, true);
+  if (staged) return staged;
+  const what = mode && mode !== 'choose' ? `Switching to ${MODE_NAMES[mode]}` : 'Preparing new stream';
+  return node ? `${what} on ${node}…` : `${what}…`;
+}
+
+const MODE_NAMES: Record<PlaybackMode, string> = { direct: 'Direct', remux: 'Remux', transcode: 'Transcode' };
+
+// ── Versions and the quality ceiling ───────────────────────────────────────
+
+/** Quality names ("4K", "1080p") are core's: technical, not translatable. Re-exported so screens take all words from here. */
+export { qualityLabel };
 
 /** "its video", "its audio", "its video and audio", or undefined for neither. */
 function convertedStreams(video: boolean, audio: boolean): string | undefined {
@@ -530,43 +222,50 @@ function convertedStreams(video: boolean, audio: boolean): string | undefined {
 }
 
 /**
- * A chosen quality that no node can convert at real speed (core's `TOO_SLOW_TO_PLAY_CODE`), naming
- * the quality and the converted streams where they are known.
+ * A chosen quality no node can convert at real speed (core's
+ * `TOO_SLOW_TO_PLAY_CODE`). The web client's `tooSlowToPlayText`, word for word.
  */
 export function tooSlowToPlayText(quality?: QualityClass, transform?: { video: string; audio: string }): string {
   const streams = transform && convertedStreams(transform.video === 'transcode', transform.audio === 'transcode');
   return `Macha can't play ${quality ? qualityLabel(quality) : 'this quality'} because the server can't convert ${streams ?? 'it'} fast enough to keep up.`;
 }
 
-/** Core stepped its own choice down to a quality a node can keep up with. */
+/** Core stepped its choice down to a quality a node can keep up with. The web client's words. */
 export function qualitySteppedDownText(quality?: QualityClass): string {
   return `Switched to ${quality ? qualityLabel(quality) : 'a lower quality'}: the server can't convert a higher quality fast enough.`;
 }
 
 /**
- * Why Play chooses the file it does, as one sentence from `PlaybackVersions`: the file chosen, a
- * larger one passed over for needing conversion (`passedOver`), and a ceiling that kept one out
- * (`limitedBy`). Undefined when Play is choosing the largest file there is.
+ * Why Play chooses the file it does, in one sentence: the file chosen, a
+ * larger one passed over for needing conversion (`passedOver`), and a ceiling
+ * that kept a larger one out (`limitedBy`). The web client's
+ * `qualityChoiceText` (`macha-client/src/text/viewerText.ts`), word for word.
+ * Undefined when Play chooses the largest file.
  */
-export function qualityChoiceText(versions: Pick<PlaybackVersions, 'files' | 'automatic' | 'limitedBy' | 'passedOver'>): string | undefined {
+export function qualityChoiceText(
+  versions: Pick<PlaybackVersions, 'files' | 'automatic' | 'limitedBy' | 'passedOver'>,
+): string | undefined {
   const { automatic, limitedBy, passedOver } = versions;
   if (!automatic) return undefined;
   const clauses: string[] = [];
-  const converted = passedOver && convertedStreams(passedOver.converts.video, passedOver.converts.audio);
-  // The node's measured rate makes the conversion too slow to watch.
+  const { video, audio } = passedOver?.converts ?? { video: false, audio: false };
+  const converted = video && audio ? 'its video and audio' : video ? 'its video' : audio ? 'its audio' : undefined;
+  // A node measured the conversion as slower than real time.
   const tooSlow = passedOver?.reasons.includes('transcode-below-real-time');
   if (passedOver && converted) {
-    clauses.push(`${qualityLabel(passedOver.quality)} needs ${converted} converted${tooSlow ? ', which the server can\'t do fast enough' : ''}`);
+    clauses.push(`${qualityLabel(passedOver.quality)} needs ${converted} converted${tooSlow ? ", which the server can't do fast enough" : ''}`);
   }
   const above = limitedBy
     ? Math.max(...versions.files.map((file) => file.quality).filter((quality) => quality > limitedBy.quality))
     : Number.NEGATIVE_INFINITY;
   if (limitedBy && Number.isFinite(above)) {
     const larger = qualityLabel(above as QualityCeiling['quality']);
-    clauses.push(limitedBy.reason === 'ceiling-display' ? `${larger} is more than this screen shows`
+    clauses.push(
+      limitedBy.reason === 'ceiling-display' ? `${larger} is more than this screen shows`
       : limitedBy.reason === 'ceiling-device' ? `${larger} is more than this device plays`
-        : limitedBy.reason === 'ceiling-cellular' ? `${larger} is more than Play uses on mobile data`
-          : `${larger} is more than the most set in Settings`);
+      : limitedBy.reason === 'ceiling-cellular' ? `${larger} is more than Play uses on mobile data`
+      : `${larger} is more than the most set in Settings`,
+    );
   }
   if (clauses.length === 0) return undefined;
   const plays = automatic.instruction.video !== 'transcode' && automatic.instruction.audio !== 'transcode';
@@ -574,63 +273,247 @@ export function qualityChoiceText(versions: Pick<PlaybackVersions, 'files' | 'au
   return `${chosen} ${clauses.join(', and ')}. Pick a quality to play another.`;
 }
 
-const AVAILABILITY_NOUN: Record<string, string> = {
-  movie: 'film', show: 'series', season: 'season', episode: 'episode', artist: 'artist\'s music', album: 'album', track: 'track', file: 'file',
-  book: 'book', series: 'series',
-};
-const MEMBER_NOUN: Record<string, string> = { show: 'episodes', season: 'episodes', artist: 'tracks', album: 'tracks', author: 'books', series: 'books' };
-/** Books are read, not played. */
-const READ_KINDS: ReadonlySet<string> = new Set(['book', 'author', 'series']);
-
-/**
- * An availability marker's tooltip. Unavailable means no reachable node holds the pieces, which is
- * not the same as lost. A container with counts says how its members stand.
- */
-export function availabilityText(
-  mark: 'partial' | 'unavailable' | 'unknown',
-  kind?: string,
-  members?: { total: number; complete: number; partial: number; unavailable: number; unknown: number },
-): string {
-  const noun = (kind && AVAILABILITY_NOUN[kind]) || 'title';
-  const memberNoun = kind ? MEMBER_NOUN[kind] : undefined;
-  const read = kind !== undefined && READ_KINDS.has(kind);
-  if (mark === 'unknown') return `Macha hasn't yet checked which servers hold this ${noun}. It ${read ? 'opens' : 'plays'} as normal.`;
-  if (mark === 'unavailable') {
-    if (kind === 'author') return 'Every book by this author is held only by servers that can\'t be reached right now, so none of them can be opened.';
-    return memberNoun
-      ? `Everything in this ${noun} is held only by servers that can't be reached right now, so none of it can be ${read ? 'opened' : 'played'}.`
-      : `This ${noun} is held only by servers that can't be reached right now, so it can't be ${read ? 'opened' : 'played'}.`;
-  }
-  if (!memberNoun) return `Part of this ${noun} is held only by servers that can't be reached right now, so it ${read ? 'may not open' : 'may stop before the end'}.`;
-  const counts = members && members.total > 0
-    ? [
-      members.complete > 0 ? `${members.complete} of ${members.total} ${memberNoun} in full` : undefined,
-      members.partial > 0 ? `${members.partial} in part` : undefined,
-      members.unavailable > 0 ? `${members.unavailable} not at all` : undefined,
-      members.unknown > 0 ? `${members.unknown} not yet checked` : undefined,
-    ].filter(Boolean).join(', ')
-    : '';
-  return `${kind === 'author' ? 'Some books by this author are' : `Some of this ${noun} is`} held only by servers that can't be reached right now${counts ? `: ${counts}` : ''}.`;
+/** A file's line: core's `technicalSummary` parts in core's order, joined with every client's separator. */
+export function fileLine(summary: TechnicalSummary): string {
+  return summary.parts.join(' · ');
 }
 
-const MONTH_YEAR = new Intl.DateTimeFormat('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
-const DAY_MONTH_YEAR = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
+/** The Settings choice that leaves the ceiling to the screen. */
+export function automaticCeilingLabel(display: QualityClass | undefined): string {
+  return display ? `Screen (${qualityLabel(display)})` : 'Screen';
+}
+
+// ── The alphabet strip ─────────────────────────────────────────────────────
+
+/** Core's catch-all key is `'other'`; the strip shows it as `#`. */
+export function alphabetKeyLabel(key: string): string {
+  return key === 'other' ? '#' : key;
+}
+
+// ── Errors ─────────────────────────────────────────────────────────────────
+
+export const SESSION_ENDED_TEXT = 'Your session has ended. Sign in again.';
+
+/** A node answered but could not serve the request, and said nothing of its own. */
+export const SERVER_BUSY_TEXT = "The Macha server couldn't answer right now. Try again shortly.";
+
+/** No connection at all. The web client's sentence, word for word. */
+export const SERVER_UNREACHABLE_TEXT =
+  'The Macha server cannot be reached. Check that the server is running and that the API address is correct.';
 
 /**
- * A book's publication date as a reader says it: "2005", "September 2005", "13 September 2005".
- * A date with a time is a day that a time zone has shifted (local midnight stored as 23:00 the
- * day before), so it rounds to the nearest day. Anything else is shown as given.
+ * Every node was tried and none answered. The web client's sentence, word for
+ * word (`macha-client` `src/text/viewerText.ts`).
  */
-export function publishedText(value: string): string {
-  const text = value.trim();
-  if (/^\d{4}$/.test(text)) return text;
-  const month = /^(\d{4})-(\d{2})$/.exec(text);
-  if (month) return MONTH_YEAR.format(Date.UTC(Number(month[1]), Number(month[2]) - 1, 1));
-  const day = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
-  if (day) return DAY_MONTH_YEAR.format(Date.UTC(Number(day[1]), Number(day[2]) - 1, Number(day[3])));
-  if (!/^\d{4}-\d{2}-\d{2}T/.test(text)) return text;
-  const time = Date.parse(text);
-  if (Number.isNaN(time)) return text;
-  const DAY_MS = 86_400_000;
-  return DAY_MONTH_YEAR.format(Math.round(time / DAY_MS) * DAY_MS);
+export const NO_NODE_ANSWERED_TEXT =
+  'No Macha server answered. Try again in a moment; if it keeps happening, check that the servers are running.';
+
+/**
+ * A sentence for any error a viewer might be shown. Never the error's
+ * message, which is log text: decided from the class, the HTTP status and the
+ * server's code.
+ */
+export function errorText(error: unknown): string {
+  if (error instanceof MachaClusterRouteError) {
+    if (error.unreachable) return NO_NODE_ANSWERED_TEXT;
+    // The nodes refused: the server's sentence, as the web client's
+    // `viewerErrorText` gives it, else ours.
+    return playbackFailureDetail(error) ?? SERVER_BUSY_TEXT;
+  }
+  if (error instanceof MachaConnectionError) return SERVER_UNREACHABLE_TEXT;
+  if (error instanceof SessionAuthError) return SESSION_ENDED_TEXT;
+  if (playbackFailureCode(error) === NOT_PLAYABLE_CODE) return 'This item cannot be played here.';
+  // Core's own codes, checked before the status: their 504 would otherwise
+  // read as `SERVER_BUSY_TEXT`. The player builds the fuller too-slow sentence.
+  if (playbackFailureCode(error) === TOO_SLOW_TO_PLAY_CODE) return tooSlowToPlayText();
+  if (playbackFailureCode(error) === START_NO_PROGRESS_CODE) return 'The node stopped making progress starting this stream.';
+  // The web client's sentence (`playbackFailureCodeText`), word for word.
+  const code = playbackFailureCode(error);
+  if (code === SESSION_PROVENANCE_UNKNOWN_CODE || code === REGENERATION_ENDPOINT_GONE_CODE) {
+    return 'This stream is no longer available. Start it again.';
+  }
+  const status = playbackFailureStatus(error);
+  if (status === 401 || status === 403) return SESSION_ENDED_TEXT;
+  if (status === 404 || status === 410) return "That isn't available any more.";
+  if (status !== undefined && status >= 500) return SERVER_BUSY_TEXT;
+  return 'Something went wrong.';
+}
+
+/**
+ * The note under Settings > Server, or nothing while the node is serving.
+ * Worded from `ServerStatus.code` (the codes of `GET /api/v1/playback/status`,
+ * in `macha` `src/service.cpp` and `src/playback.cpp`), never from `detail`.
+ * Any other code, or none (a node before 0.56.0), falls back to the HTTP status.
+ */
+export function serverStatusText(status: ServerStatus): string | undefined {
+  if (status.playbackAvailable) return undefined;
+  switch (status.code) {
+    case 'service_recovering':
+      return 'The Macha server is still starting up. Try again shortly.';
+    case 'startup_failed':
+      return "The Macha server couldn't start.";
+    case 'streaming_disabled':
+      return 'Playback is switched off on this Macha server.';
+    case 'unauthorized':
+    case 'forbidden':
+      return SESSION_ENDED_TEXT;
+    default:
+      break;
+  }
+  const http = status.httpStatus;
+  if (http === 401 || http === 403) return SESSION_ENDED_TEXT;
+  if (http >= 500) return SERVER_BUSY_TEXT;
+  return 'Playback is not available on this Macha server.';
+}
+
+/**
+ * The note under Settings > Catalogue, or nothing while it is ready. Worded
+ * from `error_code`, never from `error` (the server's English, all a node
+ * before 0.56.0 sends).
+ */
+export function catalogueStatusText(status: CatalogueStatus): string | undefined {
+  if (status.ready) return undefined;
+  if (status.error_code === 'converging') return 'The catalogue is still being brought up to date.';
+  if (status.error_code || status.error) return "The catalogue isn't available on this server right now.";
+  return undefined;
+}
+
+/** Whether this failure means the viewer is signed out, so a `401` is never reported as an outage. */
+export function isSignedOut(error: unknown): boolean {
+  if (error instanceof SessionAuthError) return true;
+  const status = playbackFailureStatus(error);
+  return status === 401 || status === 403;
+}
+
+/**
+ * Why a sign-in failed: the server's own sentence where it gave one. The
+ * server answers an unknown user and a wrong password identically; rewording
+ * here could reintroduce the difference.
+ */
+export function signInErrorText(error: unknown): string {
+  const server = playbackFailureDetail(error);
+  if (server) return server;
+  const status = playbackFailureStatus(error);
+  if (status === 401 || status === 403) return "That username and password weren't recognised.";
+  return errorText(error);
+}
+
+/** A sign-out whose revoke failed: signed out locally, but the session may still be live on a node. */
+export const SIGN_OUT_REVOKE_FAILED =
+  "Signed out on this television, but the server couldn't be told, so the session may stay open until it expires.";
+
+// ── The player's stream lines ──────────────────────────────────────────────
+
+/**
+ * The trail's stream lines ("DIRECT · HEVC · 1920×1080 · 5.6 Mb/s"), composed
+ * from `describePlaybackSession`'s data. Strings, because the description's
+ * `video` and `audio` are objects and rendering one in a `<Text>` throws.
+ */
+export interface StreamLines {
+  container?: string;
+  video?: string;
+  audio?: string;
+  subtitle?: string;
+}
+
+const CONTAINER_LABELS: Record<string, string> = { fmp4: 'FMP4', mpegts: 'MPEG-TS' };
+
+export function streamLines(description: PlaybackStatusDescription | undefined): StreamLines {
+  if (!description) return {};
+  const whole = description.delivery === 'direct' ? 'DIRECT' : description.delivery === 'remux' ? 'REMUX' : undefined;
+  const lines: StreamLines = {
+    container: description.container ? (CONTAINER_LABELS[description.container] ?? description.container.toUpperCase()) : undefined,
+  };
+
+  const video = description.video;
+  if (video && video.transform !== 'omit') {
+    const source = [video.source.codec.toUpperCase()];
+    if (video.source.width && video.source.height) source.push(`${video.source.width}×${video.source.height}`);
+    const sourceRate = formatBitrate(video.source.bitrate || video.sourceBitrate);
+    if (sourceRate) source.push(sourceRate);
+    if (video.transform === 'transcode') {
+      const output: string[] = [];
+      if (video.output?.codec) output.push(video.output.codec.toUpperCase());
+      if (video.output?.width && video.output.height) output.push(`${video.output.width}×${video.output.height}`);
+      const outputRate = formatBitrate(video.output?.bitrate ?? video.outputBitrate);
+      if (outputRate) output.push(outputRate);
+      const head = ['VIDEO TRANSCODE', 'SOURCE', ...source].join(' · ');
+      lines.video = output.length ? `${head} → ${output.join(' · ')}` : head;
+    } else {
+      lines.video = [whole ?? 'VIDEO COPY', ...source].join(' · ');
+    }
+  }
+
+  const audio = description.audio;
+  if (audio && audio.transform !== 'omit') {
+    const source = audioParts(audio.source);
+    if (audio.transform === 'transcode') {
+      const output: string[] = [];
+      if (audio.output?.codec) output.push(audio.output.codec.toUpperCase());
+      const channels = formatChannels(audio.output?.channels);
+      const rate = formatSampleRate(audio.output?.sampleRate);
+      if (channels) output.push(channels);
+      if (rate) output.push(rate);
+      if (audio.output?.bitDepth) output.push(`${audio.output.bitDepth}-bit`);
+      const bitrate = formatBitrate(audio.output?.bitrate);
+      if (bitrate) output.push(bitrate);
+      const head = ['AUDIO TRANSCODE', 'SOURCE', ...source].join(' · ');
+      lines.audio = output.length ? `${head} → ${output.join(' · ')}` : head;
+    } else {
+      lines.audio = [whole ?? 'AUDIO COPY', ...source].join(' · ');
+    }
+  }
+
+  const subtitle = description.subtitle;
+  if (subtitle) {
+    const parts = ['SUBTITLES', subtitle.language ? subtitle.language.toUpperCase() : 'UND', subtitle.codec.toUpperCase()];
+    if (subtitle.forced) parts.push('FORCED');
+    lines.subtitle = parts.join(' · ');
+  }
+  return lines;
+}
+
+function audioParts(stream: PlaybackStreamInfo): string[] {
+  const parts: string[] = [];
+  if (stream.language) parts.push(stream.language.toUpperCase());
+  parts.push(stream.codec.toUpperCase());
+  const channels = formatChannels(stream.channels);
+  const rate = formatSampleRate(stream.sampleRate);
+  if (channels) parts.push(channels);
+  if (rate) parts.push(rate);
+  if (stream.bitDepth) parts.push(`${stream.bitDepth}-bit`);
+  const bitrate = formatBitrate(stream.bitrate);
+  if (bitrate) parts.push(bitrate);
+  return parts;
+}
+
+function formatBitrate(bitrate?: number): string {
+  if (!bitrate) return '';
+  return bitrate >= 1_000_000 ? `${(bitrate / 1_000_000).toFixed(1)} Mb/s` : `${Math.round(bitrate / 1000)} kb/s`;
+}
+
+function formatChannels(channels?: number): string {
+  if (!channels) return '';
+  if (channels === 1) return 'mono';
+  if (channels === 2) return 'stereo';
+  if (channels === 6) return '5.1';
+  if (channels === 8) return '7.1';
+  return `${channels}ch`;
+}
+
+function formatSampleRate(sampleRate?: number): string {
+  if (!sampleRate) return '';
+  return sampleRate >= 1_000 ? `${Number((sampleRate / 1_000).toFixed(1))} kHz` : `${sampleRate} Hz`;
+}
+
+/**
+ * A node's name on the Status screen: its `node_name` unless blank, else its
+ * address, else the start of its id. The web client's `statusNodeName`
+ * (`macha-client/src/screens/StatusScreen.tsx`), but with `host:port`.
+ */
+export function statusNodeName(node: Pick<ClusterNodeStatus, 'id' | 'host' | 'port' | 'node_name'>): string {
+  const name = node.node_name?.trim();
+  if (name) return name;
+  if (node.host) return `${node.host}:${node.port}`;
+  return node.id.slice(0, 12);
 }

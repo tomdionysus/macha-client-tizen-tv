@@ -1,0 +1,60 @@
+import { colour, px } from '../styles/theme';
+
+/**
+ * The web client's glyphs, same paths and stroke: `AccountMenu`'s `UserIcon`
+ * and `ManageIcons`'s `SettingsIcon`. Sized in CSS px through `px()`.
+ */
+
+interface NavIconProps {
+  size?: number;
+  colour?: string;
+}
+
+export function UserIcon({ size, colour: stroke = colour.textDim }: NavIconProps): React.JSX.Element {
+  const dimension = size ?? px(18);
+  return (
+    <svg width={dimension} height={dimension} viewBox="0 0 24 24" fill="none">
+      <circle cx="12" cy="8" r="3.6" fill="none" stroke={stroke} strokeWidth={1.6} />
+      <path
+        d="M4.8 20c0-3.6 3.2-5.6 7.2-5.6s7.2 2 7.2 5.6"
+        fill="none"
+        stroke={stroke}
+        strokeWidth={1.6}
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+export function SettingsIcon({ size, colour: stroke = colour.textDim }: NavIconProps): React.JSX.Element {
+  const dimension = size ?? px(18);
+  return (
+    <svg width={dimension} height={dimension} viewBox="0 0 24 24" fill="none">
+      <path
+        d="M19.14 12.94a7.07 7.07 0 0 0 0-1.88l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.61-.22l-2.39.96a7.03 7.03 0 0 0-1.62-.94l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.59.24-1.13.56-1.62.94l-2.39-.96a.5.5 0 0 0-.61.22L2.65 8.84a.5.5 0 0 0 .12.64l2.03 1.58a7.07 7.07 0 0 0 0 1.88l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32c.13.22.39.3.61.22l2.39-.96c.49.38 1.03.7 1.62.94l.36 2.54c.04.24.25.42.5.42h3.84c.25 0 .46-.18.5-.42l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.48 0 .61-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58Z"
+        fill="none"
+        stroke={stroke}
+        strokeWidth={1.5}
+        strokeLinejoin="round"
+      />
+      <circle cx="12" cy="12" r="2.6" fill="none" stroke={stroke} strokeWidth={1.5} />
+    </svg>
+  );
+}
+
+/** `ManageIcons`'s `RefreshIcon`, same path and stroke. */
+export function RefreshIcon({ size, colour: stroke = colour.textDim }: NavIconProps): React.JSX.Element {
+  const dimension = size ?? px(18);
+  return (
+    <svg width={dimension} height={dimension} viewBox="0 0 24 24" fill="none">
+      <path
+        d="M19 7v5h-5M5 17v-5h5M18.2 10A7 7 0 0 0 6.8 6.8L5 9m14 6-1.8 2.2A7 7 0 0 1 5.8 14"
+        fill="none"
+        stroke={stroke}
+        strokeWidth={1.8}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}

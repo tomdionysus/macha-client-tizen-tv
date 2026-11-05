@@ -4,23 +4,39 @@
 
 Tom, 2026-11-04: the Tizen client needs to be, as far as can be done, identical to the React Native Android TV client, and to be reoriginated rather than recovered from old builds. This repo was split out of `macha-client` for that.
 
-Read `../macha-client-rn-tv` as the reference: read-only, never edit it. It has 11 screens in about 11,300 lines, `src/styles/theme.ts`, `src/hooks/tvFocus.ts` and `tv-now.jpg`, a screenshot of its sign-in screen.
+`../macha-client-rn-tv` is the reference: read-only, never edit it.
 
 ## What is here
 
-`src/` is a snapshot of `macha-client` at 4b20bb4: the whole web app in its Samsung build. It is a starting point so the repo builds and installs from day one, not the design. Web-only code is still in it, books with `foliate-js`, import, manage, identify and the Android files, and should go as screens are replaced.
+The web app snapshot is gone. `src/` is the Android TV client's source, file for file, on the DOM. All eleven screens are ported at once rather than one at a time, because they share one set of components.
 
-Proposed, not yet agreed with Tom: screens ported from the Android TV client one at a time, on Chromium 47's layout, theme and focus first, then sign-in, Home, library, detail, player, the rest. Keep `src/platform/SamsungWebPlatform.ts` and the native HLS path in `WebPlatform.ts`, or take what they need, since playback cannot match ExoPlayer; see `TODO/inherited-tizen-notes.md`. Tom's reply on dropping import, manage and identify is still owed: he moved the work here before answering.
+- **Copied unchanged:** the platform-neutral logic and its tests (`app/`, `text/viewerText.ts`, `hooks/tvFocus.ts` with a self-measuring `measure`, and the rest).
+- **Ported line for line:** every screen and component, on `components/primitives.tsx` in place of React Native's `View`, `Text`, `ScrollView` and `Image`.
+- **Different by necessity:** `platform/TizenPlatform.ts` and `player/TizenVideoPlayer.ts` in place of ExoPlayer: one media element, native HLS, MPEG-TS, no standby. Storage is `localStorage`. There is no volume: the television owns it.
+- **Dropped:** books, import, manage, identify, hls.js and react-router. The Android TV client has none of them. Tom has not been asked directly whether that suits the Samsung.
 
-## Measured on the set, 2026-11-04
+## Measured on the set, 2026-11-05
 
-QE55Q6FAM at 10.44.1.183:26101, platform 3.0, UA `Tizen 3.0 / AppleWebKit 538.1`.
+QE55Q6FAM at 10.44.1.183:26101, platform 3.0.
 
-- About 68 s of black from launch to load event on a clean launch with no inspector attached; DOM ready at about 0.5 s. A trace with the inspector attached: `index-legacy` evaluates for 22 s, then one event handler runs for 43 s. That handler is not identified. Nothing is rendered until it finishes.
-- `Proxy` does not exist and cannot be polyfilled. `new Proxy` in `src/playback/nodeStartCosts.ts` took the app down at startup from 6f77bf1 (2026-09-23) until 4b20bb4.
-- No grid, flex `gap`, custom properties, `inset`, `clamp` or `min()`, per `CSS.supports`.
-- The app stops at the sign-in screen: `POST /api/v1/session` answers 403 and `/status` 401, with a stored `macha.core.session`. `.login-screen` and `.connection-gate` are grid with no TV rule, so the panel sits full width at the top. In all, 50 of 93 grid classes have no rule in `samsung-tizen3.css`, and 36 `var()` uses are not rewritten.
-- Tom used a working Samsung build for about a month and saw these problems solved. Do not argue that. The 149 TV rules are unchanged from 0.14.0 to now, ignoring comments, and that cause was not found. No old `.wgt` survives. He ruled out bisecting.
+- The first build installed and reached the sign-in screen, styled by inspection of its geometry. Load event at 18.6 s with the inspector attached, against about 68 s before. DOM ready at 0.76 s. A clean launch has not been timed. The screen stays black until the bundle has run; nothing is drawn meanwhile.
+- `tizen.tvinputdevice` answered `SecurityError` on that build, so the transport keys did nothing. `config.xml` now asks for `tv.inputdevice`; not yet installed or seen working.
+- The panel is 3840x2160 (Tom confirmed). The application surface is 1920x1080 at ratio 1, and `screen`, `tizen.systeminfo` and the loaded `webapis` cannot report the panel, so automatic play stays uncapped.
+- Tom saw letterboxing that looked wrong. One title's frame was 1920x958, which leaves about 61 px top and bottom by `contain`; another's was 1920x1080, which leaves none. The magenta test on the set has no answer yet.
+- With the on-screen keyboard up the page height is 604, not 1080.
+- Tom started a title on that build: the element ran natively at `readyState` 4, advancing, no error, reporting 640x360. Tom thinks 640x360 is the source; not checked further.
+- Tom's first reports: a dark square round the logo, and missing posters. The square was the opaque PNG, now the SVG. Continue Watching's posters were signed URLs saved weeks ago: both answered 401 on the set, and the other URLs need a header an `<img>` cannot send. `LazyArtwork` now falls back to core's authenticated fetch. Both fixes are installed: the inspector reads no broken images, the two old posters loading as blobs, and the logo as the SVG. Tom confirmed the logo on 2026-11-05 and called the build much better than the previous Tizen version; he has not confirmed the posters. One Movies card draws its letter placeholder; whether that title has artwork has not been checked.
+- `tv.inputdevice` is installed and `registerKey` now answers without error; a key press has not been tried. The sign-in survived the reinstall.
+
+## Not yet seen on the set
+
+Tom signed in on the first build and Home came up with his Continue Watching row, read through the inspector. Nobody has reported on how any of it looks or moves. In order:
+
+- [ ] Sign-in on the remote: Return closes the keyboard, Up and Down leave a field.
+- [ ] Home, library, detail, series, season, search, status, settings: looks against the Android TV client, focus, Back.
+- [ ] Playback: start, seek, resume, options, subtitles, failover. `TizenVideoPlayer` is written and has unit tests on its pure parts only.
+- [ ] Transport keys, once the privilege is installed.
+- [ ] Why the load event takes as long as it does; the 43 s handler from the old build was never identified and may have gone with the old app.
 
 ## The inspector on the set
 

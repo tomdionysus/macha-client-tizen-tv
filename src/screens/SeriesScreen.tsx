@@ -1,53 +1,114 @@
-import type { MediaApi } from '@machafoundation/core';
-import { AvailabilityNote } from '../components/Availability';
-import { MediaCard } from '../components/MediaCard';
-import { ErrorMessage, Loading } from '../components/Status';
-import { useArtworkUrl } from '../hooks/useArtworkUrl';
-import { useRefreshableAsync } from '../hooks/useRefreshableAsync';
-import type { SeasonSummary, ShowDetails } from '@machafoundation/core';
-import { EditButton } from '../components/EditButton';
-import { MediaPageTitle } from '../components/MediaPageTitle';
+import { useRef } from 'react';
+import { ScrollView, Text, type Style } from '../components/primitives';
+import type { Episode, MediaApi, MediaSummary, SeasonDetails, ShowDetails } from '@machafoundation/core';
+import { useRefreshableAsync } from '../hooks/useAsync';
+import { ErrorMessage, Loading, PageTitle, RefreshError } from '../components/Status';
+import { MediaRow } from '../components/MediaRow';
+import { firstAvailableIndex } from '../components/availability';
+import { EpisodeCard } from '../components/EpisodeCard';
+import { colour, layout, lineHeightPx, pageGutter, rem, type } from '../styles/theme';
 
-interface Props {
+/** A show and its seasons, from `.series-content` in the web client. */
+export function SeriesScreen({
+  api,
+  show,
+  onOpenSeason,
+}: {
   api: MediaApi;
-  seriesId: string;
-  onBack: () => void;
-  onOpenSeason: (season: SeasonSummary) => void;
-  onEdit?: () => void;
-}
-
-export function SeriesScreen({ api, seriesId, onBack, onOpenSeason, onEdit }: Props) {
-  const details = useRefreshableAsync(() => api.details(seriesId), [api, seriesId]);
-  const show = details.value?.kind === 'show' && 'seasons' in details.value ? details.value as ShowDetails : undefined;
-  const backdrop = useArtworkUrl(api, show?.artwork?.backdrop ?? show?.artwork?.poster);
-
-  if (!details.value) return <section className="detail series-detail"><div className="detail-content series-content">
-    <button className="back-button" data-tv-focusable="true" onClick={onBack} type="button">← Back</button>
-    <MediaPageTitle refreshing={details.refreshing} onRefresh={details.refresh}>TV Series</MediaPageTitle>
-    {details.loading ? <Loading /> : details.error ? <ErrorMessage error={details.error} /> : null}
-  </div></section>;
-  if (!show) return <ErrorMessage error={new Error('Catalogue item is not a series.')} />;
+  show: MediaSummary;
+  onOpenSeason: (season: MediaSummary) => void;
+}): React.JSX.Element {
+  const details = useRefreshableAsync(() => api.details(show.id), [api, show.id]);
+  const seasons = (details.value as ShowDetails | undefined)?.seasons ?? [];
+  // The route's summary may be only an id and a title, so the fetched show wins.
+  const shown = details.value ?? show;
 
   return (
-    <section className="detail series-detail">
-      {backdrop && <div className="detail-backdrop" style={{ backgroundImage: `url(${JSON.stringify(backdrop)})` }} />}
-      <div className="detail-content series-content">
-        <button className="back-button" data-tv-focusable="true" onClick={onBack} type="button">← Back</button>
-        {onEdit && <EditButton onClick={onEdit} />}
-        <p className="eyebrow">TV Series{show.year ? ` · ${show.year}` : ''}</p>
-        <MediaPageTitle refreshing={details.refreshing} onRefresh={details.refresh}>{show.title}</MediaPageTitle>
-        <AvailabilityNote item={show} />
-        {details.error && <p className="manage-error media-refresh-error">Refresh failed: {details.error.message}</p>}
-        {show.synopsis && <p className="synopsis">{show.synopsis}</p>}
-        <section className="media-section season-section">
-          <h2>Seasons</h2>
-          <div className="media-row season-row">
-            {show.seasons.map((season) => (
-              <MediaCard key={season.id} api={api} item={season} onOpen={() => onOpenSeason(season)} />
-            ))}
-          </div>
-        </section>
-      </div>
-    </section>
+    <ScrollView contentStyle={styles.page}>
+      <PageTitle media={shown}>{shown.title}</PageTitle>
+      {shown.synopsis ? (
+        <Text style={styles.synopsis} numberOfLines={3}>
+          {shown.synopsis}
+        </Text>
+      ) : null}
+      {details.error ? (
+        details.value ? <RefreshError error={details.error} /> : <ErrorMessage error={details.error} />
+      ) : null}
+      {!details.value && details.loading ? <Loading /> : null}
+      <MediaRow title="Seasons" items={seasons} onSelect={onOpenSeason} defaultFocusFirst addressable />
+    </ScrollView>
   );
 }
+
+/** One season's episodes, from `.episode-rail`. */
+export function SeasonScreen({
+  api,
+  season,
+  onPlayEpisode,
+  progressFor,
+}: {
+  api: MediaApi;
+  season: MediaSummary;
+  onPlayEpisode: (episode: Episode) => void;
+  progressFor?: (mediaId: string) => number | undefined;
+}): React.JSX.Element {
+  const details = useRefreshableAsync(() => api.details(season.id), [api, season.id]);
+  const episodes = (details.value as SeasonDetails | undefined)?.episodes ?? [];
+  const firstFocus = firstAvailableIndex(episodes);
+  const scroller = useRef<HTMLDivElement | null>(null);
+
+  const scrollToIndex = (index: number) => {
+    const stride = layout.episodeCardWidth + layout.episodeRailGap;
+    const view = scroller.current;
+    if (view) view.scrollLeft = Math.max(0, index * stride - stride);
+  };
+
+  return (
+    <ScrollView contentStyle={styles.page}>
+      <PageTitle media={details.value ?? season}>{season.title}</PageTitle>
+      {details.error ? (
+        details.value ? <RefreshError error={details.error} /> : <ErrorMessage error={details.error} />
+      ) : null}
+      {!details.value && details.loading ? <Loading /> : null}
+
+      <ScrollView ref={scroller} horizontal contentStyle={styles.rail}>
+        {episodes.map((episode, index) => (
+          <EpisodeCard
+            key={episode.id}
+            episode={episode}
+            onSelect={() => onPlayEpisode(episode)}
+            defaultFocus={index === firstFocus}
+            progress={progressFor?.(episode.id)}
+            onFocusChange={(focused) => focused && scrollToIndex(index)}
+            style={index > 0 ? styles.episodeAfterFirst : undefined}
+          />
+        ))}
+      </ScrollView>
+    </ScrollView>
+  );
+}
+
+const styles = {
+  page: {
+    paddingTop: rem(1),
+    paddingBottom: rem(4),
+  },
+  synopsis: {
+    paddingLeft: pageGutter,
+    paddingRight: pageGutter,
+    maxWidth: rem(56),
+    color: colour.bodyBright,
+    fontSize: type.synopsis,
+    lineHeight: lineHeightPx(type.synopsis * 1.65),
+  },
+  // `.episode-rail { gap: 1.15rem; padding: .65rem 3vw 1.6rem .2rem }`
+  rail: {
+    paddingTop: rem(0.65),
+    paddingBottom: rem(1.6),
+    paddingLeft: pageGutter,
+    paddingRight: pageGutter,
+  },
+  episodeAfterFirst: {
+    marginLeft: layout.episodeRailGap,
+  },
+} satisfies Record<string, Style>;

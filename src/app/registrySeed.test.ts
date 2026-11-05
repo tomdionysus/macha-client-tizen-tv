@@ -1,0 +1,51 @@
+import { describe, expect, it } from 'vitest';
+import {
+  EndpointRegistry,
+  MachaClientConfiguration,
+  persistConfirmedEndpoints,
+  seedEndpoints,
+  type StorageLike,
+} from '@machafoundation/core';
+
+function memoryStorage(): StorageLike {
+  const values = new Map<string, string>();
+  return {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => { values.set(key, value); },
+    removeItem: (key) => { values.delete(key); },
+  };
+}
+
+/**
+ * With its configured node down, a set must still reach remembered nodes, and
+ * the remembered list must survive a restart. Seeds as `MachaProvider` does.
+ */
+describe('registry seeding', () => {
+  it('keeps the remembered nodes remembered across a restart', () => {
+    const configuration = new MachaClientConfiguration({
+      environmentEndpoints: ['http://10.35.1.50:7438'],
+      pinnedEndpoints: false,
+      storage: memoryStorage(),
+    });
+    configuration.setDiscoveredEndpoints(['http://macnessa:7438', 'http://ramaroja:7438']);
+
+    const registry = new EndpointRegistry(
+      seedEndpoints({ configured: configuration.bootstrapEndpoints(), remembered: configuration.discoveredEndpoints() }),
+    );
+    // The first health cycle after the restart: the remembered nodes answer.
+    for (const { endpoint } of registry.snapshot()) {
+      if (endpoint.baseUrl !== 'http://10.35.1.50:7438') registry.recordProbeSuccess(endpoint.id);
+    }
+    persistConfirmedEndpoints(registry, configuration);
+
+    expect(configuration.discoveredEndpoints()).toEqual(['http://macnessa:7438', 'http://ramaroja:7438']);
+  });
+
+  it('never lets a remembered node shadow a configured one', () => {
+    const seeded = seedEndpoints({ configured: ['http://a:7438'], remembered: ['http://a:7438', 'http://b:7438'] });
+    expect(seeded.map(({ baseUrl, source }) => [baseUrl, source])).toEqual([
+      ['http://a:7438', 'bootstrap'],
+      ['http://b:7438', 'discovered'],
+    ]);
+  });
+});

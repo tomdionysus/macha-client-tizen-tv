@@ -1,0 +1,98 @@
+import { Text, View, type Style } from '../../components/primitives';
+import type { MediaSummary } from '@machafoundation/core';
+import { LazyArtwork } from '../../components/LazyArtwork';
+import { useMacha } from '../../app/MachaProvider';
+import { useFileLines } from '../../app/useFileLines';
+import { trackFacts } from '../../text/viewerText';
+import { colour, font, rem, vh, vw } from '../../styles/theme';
+
+/**
+ * A track in the player: artwork above artist, album, year and track. Ports
+ * `.audio-player-*` from `macha-client` `src/styles/base.css`, without the
+ * radial gradient, as the Android client draws it.
+ */
+export function AudioPresentation({ track }: { track: MediaSummary }): React.JSX.Element {
+  const { services } = useMacha();
+  const artwork = track.artwork?.poster ?? track.artwork?.thumbnail;
+  const facts = trackFacts(track);
+  // The format line, e.g. "3:45 · FLAC · 24-bit · 96 kHz · Stereo · 2,304 kbps".
+  const lines = useFileLines(track);
+  return (
+    <View style={styles.fill} pointerEvents="none">
+      <View style={styles.art}>
+        {artwork ? (
+          <LazyArtwork api={services.mediaApi} artwork={artwork} style={styles.image} />
+        ) : (
+          <View style={styles.placeholder}>
+            <Text style={styles.placeholderGlyph}>{track.title.charAt(0).toUpperCase()}</Text>
+          </View>
+        )}
+      </View>
+      {facts.artist || facts.album || facts.track || lines.length > 0 ? (
+        <View style={styles.facts}>
+          {facts.artist ? <Text style={styles.artist} numberOfLines={1}>{facts.artist}</Text> : null}
+          {facts.album ? <Text style={styles.album} numberOfLines={1}>{facts.album}</Text> : null}
+          {facts.track ? <Text style={styles.trackLine} numberOfLines={1}>{facts.track.toUpperCase()}</Text> : null}
+          {lines.map((line) => (
+            <Text key={line} style={styles.formatLine} numberOfLines={1}>
+              {line}
+            </Text>
+          ))}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+/** `.audio-player-art { width: min(42vh, 38vw, 420px) }` */
+const ART = Math.min(vh(42), vw(38), 420);
+/** `.audio-player-art { top: 44% }` */
+const ART_CENTRE = vh(44);
+
+const styles = {
+  fill: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0 },
+  /** `.audio-player-art` */
+  art: {
+    position: 'absolute',
+    left: (vw(100) - ART) / 2,
+    top: ART_CENTRE - ART / 2,
+    width: ART,
+    height: ART,
+    /** `.audio-player-art { border-radius: .8rem }`; `radius.card` is .75rem. */
+    borderRadius: rem(0.8),
+    overflow: 'hidden',
+    backgroundColor: colour.surface2,
+  },
+  image: { width: '100%', height: '100%' },
+  /** `.audio-player-placeholder`; the TV shows the initial, as its cards do. */
+  placeholder: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  placeholderGlyph: { fontFamily: font.family, fontSize: rem(7), color: colour.audioPlaceholderGlyph },
+  /** `.audio-player-facts { top: calc(44% + half the art + 1.3rem); width: min(90vw, 36rem) }` */
+  facts: {
+    position: 'absolute',
+    top: ART_CENTRE + ART / 2 + rem(1.3),
+    left: (vw(100) - Math.min(vw(90), rem(36))) / 2,
+    width: Math.min(vw(90), rem(36)),
+    alignItems: 'center',
+  },
+  /** `.audio-player-artist { color: #f2f2f4; font-size: 1.35rem; font-weight: 600 }` */
+  artist: { fontFamily: font.family, color: colour.audioArtist, fontSize: rem(1.35), fontWeight: font.weightSemibold },
+  /** `.audio-player-album { margin-top: .3rem; color: var(--text-dim); font-size: 1.05rem }` */
+  album: { fontFamily: font.family, marginTop: rem(0.3), color: colour.textDim, fontSize: rem(1.05) },
+  /** `.audio-player-track { margin-top: .35rem; color: var(--text-faint); font-size: .85rem; letter-spacing: .06em; uppercase }` */
+  trackLine: {
+    fontFamily: font.family,
+    marginTop: rem(0.35),
+    color: colour.textFaint,
+    fontSize: rem(0.85),
+    letterSpacing: rem(0.85) * 0.06,
+  },
+  /** `.media-profile-summary` (text-dim, .95rem) */
+  formatLine: {
+    fontFamily: font.family,
+    marginTop: rem(0.45),
+    color: colour.textDim,
+    fontSize: rem(0.95),
+    letterSpacing: rem(0.95) * 0.025,
+  },
+} satisfies Record<string, Style>;

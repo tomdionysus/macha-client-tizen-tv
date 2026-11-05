@@ -1,1044 +1,874 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent } from 'react';
-import type { EndpointCandidate, MediaApi, PlaybackCapabilities, PlaybackMode } from '@machafoundation/core';
-import { PlayIcon, RestartIcon } from '../components/PlaybackIcons';
-import { Loading } from '../components/Status';
-import { createClientLogger } from '@machafoundation/core';
-import { useArtworkUrl } from '../hooks/useArtworkUrl';
-import { requestTvDefaultFocus } from '../hooks/useTvNavigation';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { css, Text, View, type Style } from '../components/primitives';
+import {
+  describePlaybackSession,
+  playbackFailureCode,
+  TOO_SLOW_TO_PLAY_CODE,
+  type Episode,
+  type MediaSummary,
+  type PlaybackCoordinatorSnapshot,
+  type PlaybackRuntime,
+} from '@machafoundation/core';
+import {
+  accelerateSeek,
+  type SeekDirection,
+  type SeekHold,
+} from './player/seekAcceleration';
+import { Button } from '../components/Button';
+import { Focusable } from '../components/Focusable';
+import { PlayerOptions, OPTIONS_SCOPE } from './player/PlayerOptions';
+import { BufferingOverlay } from './player/BufferingOverlay';
+import { bufferingDelayMs, showsBuffering, startWaitNotice } from './player/bufferingIndicator';
+import { nodeName } from './player/nodeName';
 import { useElapsedMs } from '../hooks/useElapsedMs';
-import { usePointerIdle } from '../hooks/usePointerIdle';
-import { cardSubtitle, episodeCode, playbackNoticeText, playbackTimeText, startProgressText, streamStatusText, tooSlowToPlayText } from '../text/viewerText';
-import { TrackFacts } from './player/TrackFacts';
-import { useAsync } from '../hooks/useAsync';
-import type { Platform } from '@machafoundation/core';
-import { platformTraits } from '../platform/traits';
-import type { PlaybackUpdate } from '@machafoundation/core';
-import { offeredModes, type PlaybackStartProgress, progressFor, technicalSummary, technicalProfileFromSession, type OfferedMode, type PlaybackCoordinatorSnapshot, type PlaybackPolicyOverrides, type PlaybackSession } from '@machafoundation/core';
-import { PlaybackRuntime, type PlaybackRuntimeRequest, type PlaybackRuntimeSnapshot } from '@machafoundation/core';
-import { uiSettings } from '../settings';
-import { describePlaybackSession } from '@machafoundation/core';
-import { playbackFailureTrail, type PlaybackFailureTrailEntry } from './player/failureTrail';
-import { nodeName, playerNodeChoices } from './player/nodeChoices';
-import { moveStreamToNode } from './player/nodeMove';
-import { nodeStartCosts } from '../playback/nodeStartCosts';
-import { MOVE_LEAD_MARGIN_MS, playbackFailureCode, TOO_SLOW_TO_PLAY_CODE } from '@machafoundation/core';
+import { AudioPresentation } from './player/AudioPresentation';
+import {
+  LIVE_DETAIL_CHARS,
+  LIVE_TRAIL_ENTRIES,
+  playbackFailureTrail,
+  trailSignature,
+  type PlaybackFailureTrailEntry,
+} from './player/failureTrail';
 import { failureTrailEnabled } from '../diagnostics/failureTrailSetting';
-import { accountSessionLimitNotice, playbackFailureHeadline } from '../diagnostics/failureCauses';
-import { bufferedTimelineSegments } from '@machafoundation/core';
-import type { MediaSummary, PlaybackEvent, PlaybackProgress } from '@machafoundation/core';
-import { PlayerOptions } from './player/PlayerOptions';
-import { accelerateSeek, committingScrubberKey, seekDirectionForKey, type SeekDirection, type SeekHold } from './player/seekAcceleration';
-import { samsungMediaCommand } from '../platform/SamsungMediaKeys';
+import { failureCopy } from './player/failureCopy';
+import { playbackLog } from '../diagnostics/playbackLog';
+import { AvailabilityMarker } from '../components/AvailabilityMarker';
+import { availableToPlay } from '@machafoundation/core';
+import { PlayerIcon, type PlayerIconName } from '../components/PlayerIcons';
+import { tvFocus } from '../hooks/tvFocus';
+import { backHandler } from '../hooks/backHandler';
+import { attachPlaybackHost } from '../app/usePlaybackRuntime';
+import { px, colour, cssColour, disabledOpacity, font, pageGutter, radius, rem, tabularNumbers, type } from '../styles/theme';
+import {
+  episodeLabel,
+  errorText,
+  formatPlaybackTime,
+  playbackNoticeText,
+  preparingStreamText,
+  startProgressText,
+  streamLines as streamLinesText,
+  tooSlowToPlayText,
+} from '../text/viewerText';
+import type { EpisodeNavigation } from '../app/useEpisodeNeighbours';
 
-interface Props {
-  api: MediaApi;
-  request: PlaybackRuntimeRequest;
-  platform: Platform;
+/** Chrome auto-hide after the last press. Asserted: long enough to read the stream status. */
+const CHROME_HIDE_MS = 4_000;
+
+/**
+ * Delay before a scrub preview commits as a seek. Calibrated against the
+ * D-pad's auto-repeat (roughly 60–100 ms), so a long hold costs one seek.
+ */
+const SCRUB_COMMIT_MS = 400;
+
+/** Live-trail poll interval. Asserted: cheap against a 200-entry ring, and only paid with Diagnostics on. */
+const LIVE_TRAIL_POLL_MS = 1_000;
+
+/** The scrubber, by name, so a cold left or right press can land on it. */
+const SCRUBBER_FOCUS_ID = 'player-scrubber';
+const PLAY_PAUSE_FOCUS_ID = 'player-play-pause';
+
+/** The focus scope name; while the chrome is up nothing behind it is reachable. */
+const CHROME_SCOPE = 'player-chrome';
+
+/** Scope for the failure's buttons, which outlive the chrome's auto-hide. */
+const FAILURE_SCOPE = 'player-failure';
+
+
+export function PlayerScreen({
+  media,
+  runtime,
+  onClose,
+  episodeNav,
+  onPlayEpisode,
+  returnedFromExit = 0,
+}: {
+  media: MediaSummary;
   runtime: PlaybackRuntime;
-  presentation: 'full' | 'mini';
-  onProgress: (progress: PlaybackProgress) => void;
-  onPosition: (media: MediaSummary, positionMs: number, durationMs: number) => void;
-  onMinimize: () => void;
-  onExpand: () => void;
-  onStop: () => void;
-  onPrevious: () => void;
-  onNext: () => void;
-  onEnded: () => void;
-  canPrevious: boolean;
-  canNext: boolean;
-  queuePosition?: { index: number; total: number };
-  volume: number;
-  onVolumeChange: (volume: number) => void;
-  /** Every node this client knows, for the node picker. */
-  endpoints?: readonly EndpointCandidate[];
-  /** The cluster's name for the node behind an endpoint. */
-  nodeNameOf?: (endpointId: string) => string | undefined;
-  /** Pins this node at the head of the app's registry order, where it stays. */
-  onPinEndpoint?: (endpointIds: readonly string[]) => string | undefined;
-  /** Offer every option, not only those the device's capabilities allow. */
-  offerAll?: boolean;
-}
-
-
-/**
- * What to tell a viewer whose title has not started yet, so a slow start is not an unexplained
- * spinner. Only for a start: a rebuffer has the picture behind it. A node that reports its stage
- * supplies `stage`, which replaces the general sentence.
- */
-export function startWaitNotice(starting: boolean, elapsedMs: number, stage?: string): string | undefined {
-  if (!starting || elapsedMs < uiSettings.playerStartWaitNoticeMs) return undefined;
-  return `${stage ?? 'Waiting for the node to start the stream'} · ${Math.floor(elapsedMs / 1_000)}s`;
-}
-
-/**
- * The status line while a new stream is prepared behind the one playing. A change is built on the
- * serving node, so that node is named; a start (a failover included) is on a node this line
- * cannot name, since the endpoint it holds is the one being replaced.
- */
-export function preparingStreamText(
-  progress: PlaybackStartProgress | undefined,
-  endpoint: string | undefined,
-  mode?: PlaybackMode | 'choose',
-): string {
-  const stage = progress && startProgressText({ ...progress, kind: 'change' }, progress.kind === 'change' ? endpoint : undefined, true);
-  if (stage) return stage;
-  const what = mode && mode !== 'choose' ? `Switching to ${MODE_NAMES[mode]}` : 'Preparing new stream';
-  return endpoint ? `${what} on ${endpoint}…` : `${what}…`;
-}
-
-const MODE_NAMES: Record<PlaybackMode, string> = { direct: 'Direct', remux: 'Remux', transcode: 'Transcode' };
-
-export function firstUsableDurationMs(...candidates: (number | undefined)[]): number {
-  for (const candidate of candidates) {
-    if (candidate !== undefined && Number.isFinite(candidate) && candidate > 0) return candidate;
-  }
-  return 1;
-}
-
-type PlayerIconName = 'back' | 'previous' | 'rewind' | 'pause' | 'forward' | 'next' | 'options' | 'expand' | 'close' | 'fullscreen' | 'fullscreen-exit' | 'volume' | 'mute';
-
-function PlayerIcon({ name }: { name: PlayerIconName }) {
-  const common = {
-    width: 22,
-    height: 22,
-    viewBox: '0 0 24 24',
-    fill: 'none',
-    xmlns: 'http://www.w3.org/2000/svg',
-    'aria-hidden': true,
-  } as const;
-
-  switch (name) {
-    case 'back':
-      return <svg {...common}><path d="M14.5 5 7.5 12l7 7M8 12h9" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></svg>;
-    case 'previous':
-      return <svg {...common}><path d="M6 5h2v14H6V5Zm12 1-8 6 8 6V6Z" fill="currentColor" /></svg>;
-    case 'rewind':
-      return <svg {...common}><path d="M10.5 6 4.5 12l6 6V6Zm8 0-6 6 6 6V6Z" fill="currentColor" /></svg>;
-    case 'pause':
-      return <svg {...common}><path d="M7.5 6h3v12h-3V6Zm6 0h3v12h-3V6Z" fill="currentColor" /></svg>;
-    case 'forward':
-      return <svg {...common}><path d="m13.5 6 6 6-6 6V6Zm-8 0 6 6-6 6V6Z" fill="currentColor" /></svg>;
-    case 'next':
-      return <svg {...common}><path d="M16 5h2v14h-2V5ZM6 6l8 6-8 6V6Z" fill="currentColor" /></svg>;
-    case 'options':
-      return <svg {...common}><circle cx="6" cy="12" r="1.5" fill="currentColor" /><circle cx="12" cy="12" r="1.5" fill="currentColor" /><circle cx="18" cy="12" r="1.5" fill="currentColor" /></svg>;
-    case 'expand':
-      return <svg {...common}><path d="M8.5 4.5h-4v4M15.5 4.5h4v4M8.5 19.5h-4v-4M15.5 19.5h4v-4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></svg>;
-    case 'close':
-      return <svg {...common}><path d="m6 6 12 12M18 6 6 18" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" /></svg>;
-    case 'fullscreen':
-      return <svg {...common}><path d="M8.5 4.5h-4v4M15.5 4.5h4v4M8.5 19.5h-4v-4M15.5 19.5h4v-4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></svg>;
-    case 'fullscreen-exit':
-      return <svg {...common}><path d="M9 4.5v4.5H4.5M15 4.5V9h4.5M9 19.5V15H4.5M15 19.5V15h4.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></svg>;
-    case 'volume':
-      return <svg {...common}><path d="M4 10v4h3l4 3V7l-4 3H4Z" fill="currentColor" /><path d="M14 9.2a4 4 0 0 1 0 5.6M16.6 6.8a7.3 7.3 0 0 1 0 10.4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" /></svg>;
-    case 'mute':
-      return <svg {...common}><path d="M4 10v4h3l4 3V7l-4 3H4Z" fill="currentColor" /><path d="m15 9 5 6M20 9l-5 6" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" /></svg>;
-  }
-}
-
-function VolumeControl({ volume, onChange, compact = false }: { volume: number; onChange: (volume: number) => void; compact?: boolean }) {
-  const lastAudibleRef = useRef(volume > 0 ? volume : 1);
-  useEffect(() => {
-    if (volume > 0) lastAudibleRef.current = volume;
-  }, [volume]);
-
-  return (
-    <div className={`player-volume-control${compact ? ' compact' : ''}`}>
-      <button
-        type="button"
-        data-tv-focusable="true"
-        aria-label={volume > 0 ? 'Mute' : 'Unmute'}
-        title={volume > 0 ? 'Mute' : 'Unmute'}
-        onClick={() => onChange(volume > 0 ? 0 : lastAudibleRef.current)}
-      >
-        <PlayerIcon name={volume > 0 ? 'volume' : 'mute'} />
-      </button>
-      <input
-        className="player-volume-slider"
-        type="range"
-        min={0}
-        max={1}
-        step={0.05}
-        value={volume}
-        data-tv-focusable="true"
-        aria-label="Volume"
-        onChange={(event: ChangeEvent<HTMLInputElement>) => onChange(Number(event.target.value))}
-      />
-    </div>
+  onClose: () => void;
+  /** The episodes either side, for an episode. Ignored for anything else. */
+  episodeNav?: EpisodeNavigation;
+  onPlayEpisode?: (episode: Episode) => void;
+  /** Counts returns from a standby that closed this playback; each shows the chrome on Play. */
+  returnedFromExit?: number;
+}): React.JSX.Element {
+  const [playback, setPlayback] = useState<PlaybackCoordinatorSnapshot | undefined>(() =>
+    runtime.getPlaybackSnapshot(),
   );
-}
-
-function shouldTrackProgress(media: MediaSummary): boolean {
-  return media.kind === 'movie' || media.kind === 'episode';
-}
-
-/** The line under the title: an episode's series and code, a movie's year, else its card's line. */
-export function playerMediaSubtitle(media: MediaSummary): string | undefined {
-  if (media.kind === 'episode') {
-    return `${media.playbackContext?.series.title ?? ''} ${episodeCode(media) ?? ''}`.trim() || undefined;
-  }
-  return cardSubtitle(media);
-}
-
-export function webSeekDeltaForKey(key: string): number | undefined {
-  if (key === 'ArrowLeft') return -10_000;
-  if (key === 'ArrowRight') return 10_000;
-  return undefined;
-}
-
-/**
- * Which way a transport shortcut seeks, or undefined when the keys belong to navigation. Left and
- * right are transport while the chrome is hidden, and while the bar is up only because a seek
- * revealed it, so a held seek is not disarmed by the chrome it summoned.
- */
-export function samsungTransportSeekDirection(
-  key: string,
-  keyCode: number,
-  transportActive: boolean,
-): SeekDirection | undefined {
-  return transportActive ? seekDirectionForKey(key, keyCode) : undefined;
-}
-
-// Seek distance accelerates with how long the key is held: see `./player/seekAcceleration`.
-
-export function boundedPlayerSeekTarget(positionMs: number, deltaMs: number, durationMs: number): number {
-  return Math.max(0, Math.min(Math.max(0, durationMs), positionMs + deltaMs));
-}
-
-export function playerBufferedTimelineEnabled(samsungControls: boolean): boolean {
-  return !samsungControls;
-}
-
-/** Only a pointer can reach the floating mini-player, so only `webControls` platforms minimise; the rest close. */
-export function playerBackAction(webControls: boolean): 'minimize' | 'stop' {
-  return webControls ? 'minimize' : 'stop';
-}
-
-export function playerControlShowsPlay(intentPaused: boolean, failed: boolean): boolean {
-  return failed || intentPaused;
-}
-
-export function webArrowTargetOwnsKey(target: EventTarget | null): boolean {
-  if (!(target instanceof Element)) return false;
-  // Left and right are transport everywhere, range inputs included; only text-like controls keep them.
-  return Boolean(target.closest('textarea, select, [contenteditable="true"], input:not([type="range"])'));
-}
-
-function PlayerSession({ api, media, platform, runtime, startPositionMs, presentation, onProgress, onPosition, onMinimize, onExpand, onStop, onPrevious, onNext, onEnded, canPrevious, canNext, queuePosition, volume, onVolumeChange, endpoints, nodeNameOf, onPinEndpoint, offerAll = false }: Omit<Props, 'request'> & { media: MediaSummary; startPositionMs: number }) {
-  const pageRef = useRef<HTMLElement | null>(null);
-  const hostRef = useRef<HTMLDivElement | null>(null);
-  const chromeRef = useRef<HTMLDivElement | null>(null);
-  const hideTimerRef = useRef<number | undefined>(undefined);
-  const hoveringChromeRef = useRef(false);
-  const scrubValueRef = useRef<number | undefined>(undefined);
-  const lastReportRef = useRef(0);
-  const lastPositionPersistRef = useRef(0);
-  const endedHandledRef = useRef(false);
-  /** The in-progress D-pad hold on the scrubber. */
-  const seekHoldRef = useRef<SeekHold | undefined>(undefined);
-  /** True while the control bar is up only because a transport seek revealed it. */
-  const seekRevealedControlsRef = useRef(false);
-  const lastEventByMediaRef = useRef(new Map<string, PlaybackEvent>());
-  // How the title was last seen playing, for the save on exit, when the snapshot may be gone.
-  const lastPlayingRef = useRef<PlaybackCoordinatorSnapshot | undefined>(undefined);
-  const log = useMemo(() => createClientLogger('playback.screen', { mediaId: media.id }), [media.id]);
-  const traits = platformTraits(platform);
-  const webControls = traits.hasPointerControls;
-  const samsungControls = traits.usesRemoteMediaControls;
-  const interactionControlled = webControls || samsungControls;
-  const [runtimePlayback, setRuntimePlayback] = useState<PlaybackCoordinatorSnapshot | undefined>(() => runtime.getPlaybackSnapshot());
-  const [runtimeState, setRuntimeState] = useState<PlaybackRuntimeSnapshot>(() => runtime.getSnapshot());
-  const playback: PlaybackCoordinatorSnapshot = runtimePlayback ?? {
-    intent: { positionMs: Math.max(0, startPositionMs), paused: true },
-    event: {
-      positionMs: Math.max(0, startPositionMs),
-      durationMs: media.durationMs ?? 0,
-      paused: true,
-      ended: false,
-    },
-    starting: runtimeState.phase === 'starting',
-    preparingSource: false,
-    fatalError: runtimeState.fatalError,
-  };
-  const [controlsVisible, setControlsVisible] = useState(!interactionControlled);
-  const pointer = usePointerIdle(uiSettings.playerControlsHideDelayMs);
-  const [fullscreen, setFullscreen] = useState(false);
-  const [optionsVisible, setOptionsVisible] = useState(false);
-  const [scrubValue, setScrubValue] = useState<number>();
-  const [localNotice, setLocalNotice] = useState<string>();
-  const backdrop = useArtworkUrl(api, media.artwork?.backdrop ?? media.artwork?.thumbnail ?? media.artwork?.poster);
-  const cover = useArtworkUrl(api, media.kind === 'track' ? media.artwork?.poster ?? media.artwork?.thumbnail : undefined);
-
-  useEffect(() => {
-    lastReportRef.current = 0;
-    lastPositionPersistRef.current = 0;
-    endedHandledRef.current = false;
-    scrubValueRef.current = undefined;
-    setScrubValue(undefined);
-    setLocalNotice(undefined);
-    setOptionsVisible(false);
-    hoveringChromeRef.current = false;
-  }, [media.id]);
-
-  useEffect(() => {
-    runtime.setVolume(samsungControls ? 1 : volume);
-  }, [runtime, samsungControls, volume]);
-
-  useEffect(() => {
-    const host = hostRef.current;
-    if (!host) return;
-    log.info('player-mount', {
-      itemId: media.id,
-      mediaKind: media.kind,
-      startPositionMs,
-      catalogueDurationMs: media.durationMs,
-      platform: platform.name,
-    });
-    runtime.attach(host);
-    const unsubscribePlayback = runtime.subscribePlayback(setRuntimePlayback);
-    const unsubscribeLifecycle = runtime.subscribeLifecycle(setRuntimeState);
-    return () => {
-      const latest = runtime.getPlaybackSnapshot();
-      log.info('player-unmount', { sessionId: latest?.session?.sessionId, latest: latest?.event });
-      unsubscribePlayback();
-      unsubscribeLifecycle();
-      runtime.detach(host);
-    };
-  }, [log, media.durationMs, media.id, media.kind, platform.name, runtime, startPositionMs]);
-
-  useEffect(() => {
-    const event = playback.event;
-    lastEventByMediaRef.current.set(media.id, event);
-    const now = Date.now();
-    if (event.paused || event.ended || now - lastPositionPersistRef.current >= 5_000) {
-      lastPositionPersistRef.current = now;
-      onPosition(media, event.positionMs, event.durationMs);
-    }
-    if (shouldTrackProgress(media) && (event.ended || now - lastReportRef.current >= 10_000)) {
-      lastReportRef.current = now;
-      lastPlayingRef.current = runtimePlayback;
-      onProgress(progressFor(media, event.positionMs, event.durationMs, runtimePlayback));
-    }
-  }, [media, onPosition, onProgress, playback.event, runtimePlayback]);
-
-  useEffect(() => () => {
-    if (!shouldTrackProgress(media)) return;
-    const event = lastEventByMediaRef.current.get(media.id);
-    lastEventByMediaRef.current.delete(media.id);
-    if (!event?.durationMs) return;
-    onProgress(progressFor(media, event.positionMs, event.durationMs, lastPlayingRef.current));
-  }, [media, onProgress]);
-
-  useEffect(() => {
-    if (!playback.event.ended) {
-      endedHandledRef.current = false;
-      return;
-    }
-    if (endedHandledRef.current) return;
-    endedHandledRef.current = true;
-    onEnded();
-  }, [onEnded, playback.event.ended]);
-
-  const fatalError = runtimeState.fatalError ?? playback.fatalError;
-  const playbackNotice = localNotice ?? (playback.notice && playbackNoticeText(playback.notice, runtimePlayback?.instruction?.quality));
-
-  const hideControls = useCallback(() => {
-    if (hideTimerRef.current !== undefined) {
-      window.clearTimeout(hideTimerRef.current);
-      hideTimerRef.current = undefined;
-    }
-    if (fatalError || hoveringChromeRef.current) return;
-    seekRevealedControlsRef.current = false;
-    setControlsVisible(false);
-    setOptionsVisible(false);
-    const chrome = chromeRef.current;
-    if (!chrome) return;
-    for (const selected of chrome.querySelectorAll<HTMLElement>('[data-tv-selected]')) selected.removeAttribute('data-tv-selected');
-    const active = document.activeElement;
-    if (active instanceof HTMLElement && chrome.contains(active)) active.blur();
-  }, [fatalError]);
-
-  const armControlsHide = useCallback(() => {
-    if (hideTimerRef.current !== undefined) window.clearTimeout(hideTimerRef.current);
-    hideTimerRef.current = undefined;
-    if (fatalError) return;
-    // Stay up through a status change (seek, reconfiguration, subtitle load) so the input visibly registers.
-    if (playback.preparingSource) return;
-    // Never auto-hide under a resting pointer.
-    if (hoveringChromeRef.current) return;
-    if (!interactionControlled && (playback.intent.paused || optionsVisible)) return;
-    hideTimerRef.current = window.setTimeout(hideControls, uiSettings.playerControlsHideDelayMs);
-  }, [fatalError, hideControls, interactionControlled, optionsVisible, playback.intent.paused, playback.preparingSource]);
-
-  const showControls = useCallback(() => {
-    setControlsVisible(true);
-    armControlsHide();
-  }, [armControlsHide]);
-
-  const focusSamsungControls = useCallback(() => {
-    const chrome = chromeRef.current;
-    if (!chrome) return;
-    const elements = Array.from(chrome.querySelectorAll<HTMLElement>('[data-tv-focusable="true"]:not([disabled])'));
-    if (elements.length === 0) return;
-    for (const element of elements) element.removeAttribute('data-tv-selected');
-    const preferred = elements.find((element) => element.getAttribute('data-tv-default-focus') === 'true') ?? elements[0];
-    preferred.setAttribute('data-tv-selected', 'true');
-    preferred.focus();
-  }, []);
-
-  const noteWebPointerMovement = useCallback((clientY: number) => {
-    if (presentation !== 'full' || !webControls) return;
-    const chrome = chromeRef.current;
-    if (!chrome) return;
-    const bounds = chrome.getBoundingClientRect();
-    if (clientY < bounds.top || clientY > bounds.bottom) return;
-    showControls();
-  }, [presentation, showControls, webControls]);
-
-  const setScrubPosition = useCallback((positionMs: number | undefined) => {
-    scrubValueRef.current = positionMs;
-    setScrubValue(positionMs);
-  }, []);
-
-  const setPaused = useCallback((paused: boolean) => {
-    setLocalNotice(undefined);
-    runtime.setPaused(paused);
-    if (!interactionControlled) {
-      if (paused) {
-        setControlsVisible(true);
-        if (hideTimerRef.current !== undefined) window.clearTimeout(hideTimerRef.current);
-      } else {
-        showControls();
-      }
-    }
-  }, [interactionControlled, runtime, showControls]);
-
-  // Freeze the picture when a seek is committed, before core decides how to serve it: core reports
-  // nothing until a replacement exists. A buffered target releases in the same tick, at no cost.
-  const holdPicture = useCallback(() => {
-    (platform as Partial<{ holdPicture(): void }>).holdPicture?.();
-  }, [platform]);
-
-  const releasePicture = useCallback(() => {
-    (platform as Partial<{ releasePicture(): void }>).releasePicture?.();
-  }, [platform]);
-
-  const seek = useCallback((positionMs: number) => {
-    setLocalNotice(undefined);
-    setScrubPosition(undefined);
-    holdPicture();
-    // Whole milliseconds: a range input returns its maximum exactly, and a fractional duration at the
-    // end of the title is where a node is most likely to clamp and round.
-    const accepted = runtime.seek(Math.round(positionMs));
-    // A refused seek moves nothing, so the hold is released.
-    if (!accepted) {
-      releasePicture();
-      const notice = runtime.getPlaybackSnapshot()?.notice;
-      setLocalNotice(notice && playbackNoticeText(notice, runtime.getPlaybackSnapshot()?.instruction?.quality));
-    }
-    if (!interactionControlled) showControls();
-    return accepted;
-  }, [holdPicture, interactionControlled, releasePicture, runtime, setScrubPosition, showControls]);
-
-  const seekBy = useCallback((deltaMs: number) => {
-    setLocalNotice(undefined);
-    setScrubPosition(undefined);
-    holdPicture();
-    if (!runtime.seekBy(deltaMs)) releasePicture();
-    if (!interactionControlled) showControls();
-  }, [holdPicture, interactionControlled, releasePicture, runtime, setScrubPosition, showControls]);
-
-  const playFromStart = useCallback(() => {
-    log.info('restart-ui-request', {
-      sessionId: playback.session?.sessionId,
-      mode: playback.session?.mode,
-      currentPositionMs: playback.event.positionMs,
-    });
-    runtime.seek(0);
-    runtime.setPaused(false);
-  }, [log, playback.event.positionMs, playback.session?.mode, playback.session?.sessionId, runtime]);
-
-  const reconfigure = useCallback((update: PlaybackUpdate) => {
-    setLocalNotice(undefined);
-    runtime.update(update);
-  }, [runtime]);
-
-  const nodeChoices = useMemo(
-    () => playerNodeChoices(endpoints ?? [], playback.session?.endpoint?.id, nodeNameOf),
-    [endpoints, nodeNameOf, playback.session?.endpoint?.id],
+  const isEpisode = media.kind === 'episode';
+  const [chromeVisible, setChromeVisible] = useState(true);
+  /** For the command subscription, which is made once. */
+  const chromeVisibleRef = useRef(chromeVisible);
+  chromeVisibleRef.current = chromeVisible;
+  const [optionsOpen, setOptionsOpen] = useState(false);
+  // No volume here: the television owns it, and the element stays at unity.
+  // Core says `starting` without saying since when, so the wait is counted here.
+  const starting = playback?.starting ?? false;
+  const startWaitMs = useElapsedMs(starting);
+  const [scrubPosition, setScrubPosition] = useState<number | undefined>();
+  /** Snapshotted once per failure, so the trail does not reshuffle under a reader. */
+  const trail = useMemo(
+    () => (playback?.fatalError && failureTrailEnabled() ? playbackFailureTrail() : []),
+    [playback?.fatalError],
   );
-  // What this device can decode, asked once per player; it decides what a remux may ask the node to copy.
-  const [capabilities, setCapabilities] = useState<PlaybackCapabilities | undefined>(undefined);
-  useEffect(() => {
-    let cancelled = false;
-    void platform.capabilities()
-      .then((detected) => { if (!cancelled) setCapabilities(detected); })
-      .catch(() => { /* Unknown capabilities make remux transcode audio, which always works. */ });
-    return () => { cancelled = true; };
-  }, [platform]);
-  const [movingToNode, setMovingToNode] = useState<string | undefined>(undefined);
   /**
-   * Sends this stream to the node the viewer picked, at the current position. Core's `moveTo` builds
-   * a session there under the playing picture, then swaps; `play()` would restart through black.
-   * The pin is set before the request so the resolver chooses that node, and stays for later seeks,
-   * mode changes and recovery.
+   * Decided once per failure. The code is logged here because only the
+   * coordinator's assembled error carries the whole chain. See `failureCopy`.
    */
-  const selectNode = useCallback((nodeId: string) => {
-    const choice = nodeChoices.find((node) => node.id === nodeId);
-    if (!onPinEndpoint || !choice) return;
-    const positionMs = Math.max(0, Math.round(scrubValueRef.current ?? playback.intent.positionMs));
-    // This viewer's latest start cost for that node plus core's margin; with none, core estimates.
-    const measured = nodeStartCosts.forNode(choice.endpointIds);
-    const leadMs = measured ? measured.costMs + MOVE_LEAD_MARGIN_MS : undefined;
-    log.info('node-move-request', {
-      from: playback.session?.endpoint?.id,
-      to: choice.endpointIds,
-      positionMs,
-      leadMs,
-      measuredStartCostMs: measured?.costMs,
-      measuredAgeMs: measured?.ageMs,
-      sessionId: playback.session?.sessionId,
-    });
-    setLocalNotice(undefined);
-    const endpointId = onPinEndpoint(choice.endpointIds);
-    if (endpointId === undefined) return;
-    setMovingToNode(nodeId);
-    // Cleared when the move settles: a move never removes the session, so that cannot be the signal.
-    void moveStreamToNode(runtime, endpointId, Boolean(fatalError), leadMs)
-      .then((outcome) => {
-        log.info('node-move-settled', { to: endpointId, outcome });
-        if (outcome === 'refused') {
-          setLocalNotice(`${choice.label} could not take this stream, so it is still playing from here.`);
-        }
-      })
-      .finally(() => setMovingToNode(undefined));
-  }, [fatalError, log, nodeChoices, onPinEndpoint, playback.intent.positionMs, playback.session?.endpoint?.id, playback.session?.sessionId, runtime]);
+  const fatal = useMemo(
+    () => (playback?.fatalError ? failureCopy(playback.fatalError) : undefined),
+    [playback?.fatalError],
+  );
+  useEffect(() => {
+    if (fatal?.code) playbackLog.warn('fatal-error-code', { code: fatal.code });
+  }, [fatal]);
+  const hideTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const commitTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  /** The element the player puts its `<video>` in. */
+  const host = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => runtime.subscribePlayback(setPlayback), [runtime]);
+
+  // Binding the surface is `attach`, not `play`: it must not create a session.
+  useEffect(() => attachPlaybackHost(runtime, host.current), [runtime]);
+
+  /**
+   * For `showChrome`, which is stable. The hide timer is not armed while the
+   * options panel is open: re-showing the chrome would push its scope above
+   * the panel's.
+   */
+  const optionsOpenRef = useRef(false);
+  /** A change to a playing stream is being prepared; the chrome holds, as for the options panel. */
+  const changingRef = useRef(false);
+
+  const showChrome = useCallback(() => {
+    setChromeVisible(true);
+    if (hideTimer.current) clearTimeout(hideTimer.current);
+    if (optionsOpenRef.current || changingRef.current) return;
+    hideTimer.current = setTimeout(() => setChromeVisible(false), CHROME_HIDE_MS);
+  }, []);
+
+  /** Hide now and clear the timer, so it cannot fire against a chrome since re-shown. */
+  const hideChrome = useCallback(() => {
+    if (hideTimer.current) clearTimeout(hideTimer.current);
+    hideTimer.current = undefined;
+    setChromeVisible(false);
+  }, []);
 
   useEffect(() => {
-    if (presentation === 'full') {
-      if (hideTimerRef.current !== undefined) window.clearTimeout(hideTimerRef.current);
-      hideTimerRef.current = undefined;
-      setOptionsVisible(false);
-      setControlsVisible(!interactionControlled);
-    }
+    showChrome();
     return () => {
-      if (hideTimerRef.current !== undefined) window.clearTimeout(hideTimerRef.current);
+      if (hideTimer.current) clearTimeout(hideTimer.current);
+      if (commitTimer.current) clearTimeout(commitTimer.current);
     };
-  }, [interactionControlled, presentation]);
+  }, [showChrome]);
 
-  // Read once, when the failure lands: the buffer keeps filling and would push the evidence off the list.
-  const [failureTrail, setFailureTrail] = useState<PlaybackFailureTrailEntry[]>([]);
-  useEffect(() => {
-    setFailureTrail(fatalError && failureTrailEnabled() ? playbackFailureTrail() : []);
-  }, [fatalError]);
+  /**
+   * Any press re-shows the chrome; with it hidden, left or right also seeks
+   * through the scrubber's ladder. The chrome is unmounted while hidden, so
+   * focus moves to the scrubber in the effect below, once it is registered.
+   */
+  const focusScrubberOnShow = useRef(false);
+
+  useEffect(
+    () =>
+      tvFocus.onCommand((command) => {
+        const hidden = !chromeVisibleRef.current;
+        showChrome();
+        if (!hidden) return;
+        if (command !== 'left' && command !== 'right') return;
+        focusScrubberOnShow.current = true;
+        seekByHeldKeyRef.current(command === 'left' ? -1 : 1);
+      }),
+    [showChrome],
+  );
 
   useEffect(() => {
-    if (!fatalError) return;
-    setControlsVisible(true);
-    setOptionsVisible(false);
-    if (hideTimerRef.current !== undefined) window.clearTimeout(hideTimerRef.current);
-  }, [fatalError]);
+    if (!chromeVisible || !focusScrubberOnShow.current) return;
+    focusScrubberOnShow.current = false;
+    tvFocus.select(SCRUBBER_FOCUS_ID);
+  }, [chromeVisible]);
 
+
+  // Selected before the chrome mounts: a control registering into the
+  // selection takes it.
   useEffect(() => {
-    if (!playback.preparingSource) {
-      armControlsHide();
+    if (returnedFromExit === 0) return;
+    showChrome();
+    tvFocus.select(PLAY_PAUSE_FOCUS_ID);
+  }, [returnedFromExit, showChrome]);
+
+  // A change to a playing stream (a mode switch, a seek, a new track) holds the
+  // chrome up so its status line acknowledges the input, as the web client's
+  // controls stay up while `preparingSource`. Not at startup, where there is
+  // no session yet.
+  const changing = Boolean(playback?.preparingSource && playback.session);
+  useEffect(() => {
+    changingRef.current = changing;
+    if (changing) {
+      setChromeVisible(true);
+      if (hideTimer.current) clearTimeout(hideTimer.current);
+      hideTimer.current = undefined;
+    } else if (chromeVisibleRef.current) {
+      showChrome();
+    }
+  }, [changing, showChrome]);
+
+  // The options panel takes the D-pad while open.
+  useEffect(() => {
+    if (!optionsOpen) return undefined;
+    tvFocus.pushScope(OPTIONS_SCOPE);
+    return () => tvFocus.popScope(OPTIONS_SCOPE);
+  }, [optionsOpen]);
+
+  /** The too-slow overlay takes the D-pad while it is up. */
+  const tooSlow = Boolean(playback?.fatalError) && playbackFailureCode(playback?.fatalError) === TOO_SLOW_TO_PLAY_CODE;
+  useEffect(() => {
+    if (!tooSlow) return undefined;
+    tvFocus.pushScope(FAILURE_SCOPE);
+    return () => tvFocus.popScope(FAILURE_SCOPE);
+  }, [tooSlow]);
+
+  // The chrome owns the D-pad while up (the web client scopes to
+  // `.player-chrome.visible`), except under the failure's buttons, where its
+  // scope would stack above theirs.
+  useEffect(() => {
+    if (!chromeVisible || tooSlow) {
+      tvFocus.popScope(CHROME_SCOPE);
+      return undefined;
+    }
+    tvFocus.pushScope(CHROME_SCOPE);
+    return () => tvFocus.popScope(CHROME_SCOPE);
+  }, [chromeVisible, tooSlow]);
+
+  // The panel holds the chrome open: auto-hide would unmount the scope in use.
+  useEffect(() => {
+    optionsOpenRef.current = optionsOpen;
+    if (optionsOpen && hideTimer.current) clearTimeout(hideTimer.current);
+    // Closing the panel hands the chrome back to its ordinary timer.
+    if (!optionsOpen) showChrome();
+  }, [optionsOpen, showChrome]);
+
+  /**
+   * Back unwinds one layer per press: panel, chrome, then player. Registered
+   * here because `backHandler` calls listeners in reverse registration order
+   * and this screen mounts after the root; returning `false` hands the press
+   * to the app, which writes the resume point and stops the session.
+   */
+  useEffect(() => {
+    const subscription = backHandler.addListener(() => {
+      if (optionsOpen) {
+        setOptionsOpen(false);
+        return true;
+      }
+      if (chromeVisibleRef.current) {
+        hideChrome();
+        return true;
+      }
+      return false;
+    });
+    return () => subscription.remove();
+  }, [optionsOpen, hideChrome]);
+
+  const event = playback?.event;
+  const duration = event?.durationMs ?? media.durationMs ?? 0;
+  /**
+   * The scrub preview, else core's intent, as in the web client's
+   * `PlayerScreen.tsx`. Not `event.positionMs`, which reports the old position
+   * until the player has moved, so the bar would snap back.
+   */
+  const position = scrubPosition ?? Math.min(duration || Number.MAX_SAFE_INTEGER, playback?.intent.positionMs ?? 0);
+  const paused = playback?.intent.paused ?? false;
+  const buffered = event?.bufferedRangesMs?.[0]?.endMs ?? 0;
+
+  const commitScrub = useCallback(
+    (target: number) => {
+      if (commitTimer.current) clearTimeout(commitTimer.current);
+      commitTimer.current = setTimeout(() => {
+        runtime.seek(target);
+        setScrubPosition(undefined);
+      }, SCRUB_COMMIT_MS);
+    },
+    [runtime],
+  );
+
+  /**
+   * Accelerating seek, ported from the web client: the ladder climbs on time
+   * held, not on auto-repeat count. See `seekAcceleration.ts`.
+   */
+  const seekHold = useRef<SeekHold | undefined>(undefined);
+
+  const seekByHeldKey = useCallback(
+    (direction: SeekDirection) => {
+      const { hold, deltaMs } = accelerateSeek(seekHold.current, direction, Date.now());
+      seekHold.current = hold;
+      nudgeRef.current(deltaMs);
+    },
+    [],
+  );
+
+  const nudge = useCallback(
+    (deltaMs: number) => {
+      const base = scrubPosition ?? playback?.intent.positionMs ?? 0;
+      const next = Math.max(0, Math.min(duration || Number.MAX_SAFE_INTEGER, base + deltaMs));
+      setScrubPosition(next);
+      showChrome();
+      commitScrub(next);
+    },
+    [scrubPosition, playback?.intent.positionMs, duration, showChrome, commitScrub],
+  );
+
+  // `seekByHeldKey` stays stable and reaches the latest `nudge` through this ref.
+  const nudgeRef = useRef(nudge);
+  nudgeRef.current = nudge;
+  const seekByHeldKeyRef = useRef(seekByHeldKey);
+  seekByHeldKeyRef.current = seekByHeldKey;
+
+  // Core's `describePlaybackSession`, as the web client uses it. The endpoint
+  // becomes the node's name (`nodeName`), never the whole URL; absent parts are
+  // omitted, not defaulted.
+  const described = describePlaybackSession(playback?.session, event?.streamOrigin);
+  const streamStatus = described && { ...described, endpoint: nodeName(described.endpoint, described.endpointName) };
+
+  /**
+   * The session id shows only with Diagnostics on: the node lists no session
+   * ids, and reproducing a reaped session needs one. Read per render; the
+   * setting cannot change without leaving the player.
+   */
+  const diagnostics = failureTrailEnabled();
+
+  /**
+   * The trail as it fills: a failover that recovers shows no failure screen,
+   * and a television has no console. Polled because core's buffer has
+   * `snapshot()` and no subscription, and a stall stops renders.
+   */
+  const [liveTrail, setLiveTrail] = useState<PlaybackFailureTrailEntry[]>([]);
+  useEffect(() => {
+    if (!diagnostics) {
+      setLiveTrail([]);
       return;
     }
-    // Only for a change to a playing stream, where the bar acknowledges the input; at startup it
-    // would flash chrome over a title just appearing.
-    if (playback.session) setControlsVisible(true);
-    if (hideTimerRef.current !== undefined) {
-      window.clearTimeout(hideTimerRef.current);
-      hideTimerRef.current = undefined;
-    }
-  }, [armControlsHide, playback.preparingSource, playback.session]);
-
-  useEffect(() => {
-    const onFullscreenChange = () => {
-      setFullscreen(document.fullscreenElement === pageRef.current);
-      if (presentation === 'full' && !interactionControlled) showControls();
+    let signature = '';
+    const read = () => {
+      const next = playbackFailureTrail(undefined, LIVE_DETAIL_CHARS, 'info').slice(-LIVE_TRAIL_ENTRIES);
+      const nextSignature = trailSignature(next);
+      if (nextSignature === signature) return;
+      signature = nextSignature;
+      setLiveTrail(next);
     };
-    document.addEventListener('fullscreenchange', onFullscreenChange);
-    return () => document.removeEventListener('fullscreenchange', onFullscreenChange);
-  }, [interactionControlled, presentation, showControls]);
+    read();
+    const timer = setInterval(read, LIVE_TRAIL_POLL_MS);
+    return () => clearInterval(timer);
+  }, [diagnostics]);
 
-  useEffect(() => {
-    if (presentation === 'mini' && document.fullscreenElement === pageRef.current) {
-      void document.exitFullscreen().catch(() => undefined);
-    }
-  }, [presentation]);
+  // Composed here: the description is data, and its `video` and `audio` are
+  // objects React could not render as text.
+  const streamLines = useMemo(() => {
+    const worded = streamLinesText(streamStatus);
+    return [
+      [worded.container, streamStatus?.endpoint].filter(Boolean).join(' : '),
+      worded.video,
+      worded.audio,
+      worded.subtitle,
+    ].filter((line): line is string => Boolean(line));
+  }, [streamStatus]);
 
-  useEffect(() => {
-    if (samsungControls) requestTvDefaultFocus();
-  }, [presentation, samsungControls]);
-
-  const toggleFullscreen = useCallback(async () => {
-    if (!webControls || !document.fullscreenEnabled || !pageRef.current) return;
-    try {
-      if (document.fullscreenElement) await document.exitFullscreen();
-      else await pageRef.current.requestFullscreen();
-    } catch (error) {
-      log.warn('fullscreen-failed', { error });
-    }
-  }, [log, webControls]);
-
-  useEffect(() => {
-    // Android intercepts its back button natively before any keydown fires, so MainActivity calls
-    // this directly, falling back to its own behaviour when it is absent or returns false.
-    const host = window as unknown as { __machaHandleBack?: () => boolean };
-    host.__machaHandleBack = () => {
-      if (presentation !== 'full') return false;
-      onStop();
-      return true;
-    };
-    return () => { delete host.__machaHandleBack; };
-  }, [onStop, presentation]);
-
-  useEffect(() => {
-    const onKeyDown = (keyEvent: KeyboardEvent) => {
-      const mediaCommand = samsungMediaCommand(keyEvent.key, samsungControls ? keyEvent.keyCode : 0);
-      const samsungBack = samsungControls && (
-        keyEvent.keyCode === 10009
-        || keyEvent.key === 'Escape'
-        || keyEvent.key === 'Backspace'
-        || keyEvent.key === 'BrowserBack'
-        || keyEvent.key === 'XF86Back'
-      );
-      const samsungOk = samsungControls && (keyEvent.key === 'Enter' || keyEvent.keyCode === 13);
-      const samsungDirection = samsungControls && (
-        ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Left', 'Right', 'Up', 'Down'].includes(keyEvent.key)
-        || [37, 38, 39, 40].includes(keyEvent.keyCode)
-      );
-
-      if (presentation === 'full' && samsungBack) {
-        keyEvent.preventDefault();
-        keyEvent.stopPropagation();
-        if (scrubValueRef.current !== undefined && keyEvent.target instanceof HTMLInputElement && keyEvent.target.classList.contains('player-scrubber')) {
-          setScrubPosition(undefined);
-          return;
-        }
-        // A TV remote has no pointer to reach a mini player, so Back closes outright.
-        onStop();
-        return;
-      }
-      if (presentation === 'full' && samsungOk && !controlsVisible) {
-        keyEvent.preventDefault();
-        keyEvent.stopPropagation();
-        showControls();
-        window.setTimeout(focusSamsungControls, 0);
-        return;
-      }
-      if (presentation === 'full' && samsungControls) {
-        // Left and right stay transport while a seek revealed the bar: see samsungTransportSeekDirection.
-        const transportActive = !controlsVisible || seekRevealedControlsRef.current;
-        const direction = samsungTransportSeekDirection(keyEvent.key, keyEvent.keyCode, transportActive);
-        if (direction !== undefined) {
-          keyEvent.preventDefault();
-          keyEvent.stopPropagation();
-          // The scrubber's ladder and hold, so the distance does not depend on whether the bar is up.
-          const { hold, deltaMs } = accelerateSeek(seekHoldRef.current, direction, Date.now());
-          seekHoldRef.current = hold;
-          seekBy(deltaMs);
-          // Show the scrubber so the viewer can see where the seek landed.
-          seekRevealedControlsRef.current = true;
-          showControls();
-          return;
-        }
-      }
-      if (presentation === 'full' && samsungDirection) {
-        if (!controlsVisible) {
-          keyEvent.preventDefault();
-          keyEvent.stopPropagation();
-          return;
-        }
-        armControlsHide();
-      }
-      if (presentation === 'full' && !samsungControls && keyEvent.key === 'Escape' && document.fullscreenElement) return;
-      if (presentation === 'full' && !samsungControls && (keyEvent.key === 'Escape' || keyEvent.key === 'Backspace')) {
-        keyEvent.preventDefault();
-        keyEvent.stopPropagation();
-        if (optionsVisible) { setOptionsVisible(false); return; }
-        // Non-web here is Android with a keyboard in a dev build; a device's back button is intercepted natively.
-        if (playerBackAction(webControls) === 'minimize') onMinimize();
-        else onStop();
-        return;
-      }
-      if (mediaCommand || (presentation === 'full' && keyEvent.key === ' ')) {
-        keyEvent.preventDefault();
-        keyEvent.stopPropagation();
-        if (keyEvent.repeat && mediaCommand !== 'rewind' && mediaCommand !== 'fast-forward') return;
-        switch (mediaCommand) {
-          case 'play': setPaused(false); break;
-          case 'pause': setPaused(true); break;
-          case 'previous':
-            if (canPrevious) onPrevious();
-            else setLocalNotice('Already at the first item.');
-            break;
-          case 'next':
-            if (canNext) onNext();
-            else setLocalNotice('Already at the last item.');
-            break;
-          case 'stop': onStop(); break;
-          case 'rewind': seekBy(-10_000); break;
-          case 'fast-forward': seekBy(10_000); break;
-          case 'toggle':
-          default: setPaused(!playback.intent.paused); break;
-        }
-        return;
-      }
-      if (presentation === 'full' && webControls && !keyEvent.altKey && !keyEvent.ctrlKey && !keyEvent.metaKey) {
-        const delta = webSeekDeltaForKey(keyEvent.key);
-        if (delta !== undefined && !webArrowTargetOwnsKey(keyEvent.target)) {
-          keyEvent.preventDefault();
-          keyEvent.stopPropagation();
-          showControls();
-          seekBy(delta);
-          return;
-        }
-      }
-      if (presentation === 'full' && !interactionControlled) showControls();
-    };
-    window.addEventListener('keydown', onKeyDown, true);
-    return () => window.removeEventListener('keydown', onKeyDown, true);
-  }, [armControlsHide, canNext, canPrevious, controlsVisible, focusSamsungControls, interactionControlled, onMinimize, onNext, onPrevious, onStop, optionsVisible, playback.intent.paused, presentation, samsungControls, seekBy, setPaused, setScrubPosition, showControls, webControls]);
-
-  const session = playback.session;
-  const offered = useMemo(
-    () => modesToOffer(runtimePlayback?.modes, session, capabilities, (platform as { playbackPolicy?: PlaybackPolicyOverrides }).playbackPolicy, offerAll),
-    [capabilities, offerAll, platform, runtimePlayback?.modes, session],
-  );
-  const event = playback.event;
-  const duration = firstUsableDurationMs(session?.durationMs, event.durationMs, media.durationMs);
-  const displayedProgress = scrubValue ?? Math.min(duration, playback.intent.positionMs);
-  const playedPercent = Math.max(0, Math.min(100, displayedProgress / Math.max(1, duration) * 100));
-  const bufferedSegments = useMemo(
-    () => playerBufferedTimelineEnabled(samsungControls)
-      ? bufferedTimelineSegments(playback.event.bufferedRangesMs, duration)
-      : [],
-    [duration, playback.event.bufferedRangesMs, samsungControls],
-  );
-  const scrubberVisual = (
-    <span className="player-scrubber-visual" aria-hidden="true">
-      {bufferedSegments.map((range, index) => (
-        <span
-          className="player-scrubber-buffered"
-          key={`${index}:${range.leftPercent.toFixed(4)}:${range.widthPercent.toFixed(4)}`}
-          style={{ left: `${range.leftPercent}%`, width: `${range.widthPercent}%` }}
-        />
-      ))}
-      <span className="player-scrubber-played" style={{ width: `${playedPercent}%` }} />
-    </span>
-  );
-  const audio = media.kind === 'track';
-  // The playing track's format line, from the catalogue profile of the file the session names.
-  const playingMediaId = audio ? session?.mediaId : undefined;
-  const trackFormat = useAsync(
-    async (signal) => {
-      if (!playingMediaId?.startsWith('macha:') || !api.mediaProfile) return undefined;
-      const profile = await api.mediaProfile(playingMediaId, signal);
-      return profile ? technicalSummary(profile).parts : undefined;
-    },
-    [api, playingMediaId],
-  );
-  const described = describePlaybackSession(session, event.streamOrigin);
-  // The cluster's name for the serving node where core knows it, else its host: never a URL.
-  const streamStatus = described && { endpoint: described.endpointName ?? nodeName(described.endpoint), ...streamStatusText(described) };
-  const mediaSubtitle = playerMediaSubtitle(media);
-  const pausedForControl = playerControlShowsPlay(playback.intent.paused, Boolean(fatalError));
-  const queueLabel = queuePosition && queuePosition.total > 1 ? `${queuePosition.index + 1} of ${queuePosition.total}` : undefined;
-  const playerSubtitle = [mediaSubtitle, queueLabel].filter(Boolean).join(' · ');
-  const tooSlow = Boolean(fatalError) && playbackFailureCode(fatalError) === TOO_SLOW_TO_PLAY_CODE;
-  const showBuffering = !fatalError && (playback.starting || Boolean(event.buffering));
-  // Counted here: core says `starting` without saying since when.
-  const startWaitMs = useElapsedMs(playback.starting);
+  const playedPercent = duration > 0 ? Math.min(100, (position / duration) * 100) : 0;
+  const bufferedPercent = duration > 0 ? Math.min(100, (buffered / duration) * 100) : 0;
 
   return (
-    <section
-      ref={pageRef}
-      className={`player-page player-presentation-${presentation} ${audio ? 'audio-player' : ''} ${fullscreen && !controlsVisible && pointer.idle && !fatalError ? 'cursor-hidden' : ''} ${fatalError ? 'player-failed' : ''}`}
-      onPointerMove={(pointerEvent) => {
-        if (presentation !== 'full') return;
-        // Any movement restores the cursor; the chrome follows its own rules below.
-        pointer.noteMovement();
-        if (webControls) {
-          if (!pointerEvent.pointerType || pointerEvent.pointerType === 'mouse') noteWebPointerMovement(pointerEvent.clientY);
-        } else if (!samsungControls) {
-          showControls();
-        }
-      }}
-      onPointerDown={() => {
-        if (presentation === 'full' && !interactionControlled) showControls();
-      }}
-      onClick={(clickEvent: MouseEvent<HTMLElement>) => {
-        if (presentation === 'full') {
-          if (webControls) {
-            const target = clickEvent.target as HTMLElement;
-            if (!target.closest('.player-chrome')) hideControls();
-          }
-          return;
-        }
-        const target = clickEvent.target as HTMLElement;
-        if (!target.closest('button, input')) onExpand();
-      }}
-    >
-      {backdrop && <div className="player-backdrop" style={{ backgroundImage: `url(${JSON.stringify(backdrop)})` }} />}
-      <div ref={hostRef} className="player-host" />
-      {audio && (
-        <div className="audio-player-art">
-          {cover ? <img src={cover} alt="" /> : <div className="audio-player-placeholder">♪</div>}
-        </div>
-      )}
-      {audio && <TrackFacts track={media} format={trackFormat.value} />}
-      {showBuffering && (
-        <Loading
-          delayMs={playback.starting ? 0 : uiSettings.playerSeekSpinnerDelayMs}
+    <View style={styles.page}>
+      {/* `.player-host`: the video surface, behind everything. */}
+      <View ref={host} style={styles.host} />
+
+      {/* `.audio-player` */}
+      {media.kind === 'track' ? <AudioPresentation track={media} /> : null}
+
+      {playback?.fatalError ? (
+        <View style={styles.fatalError}>
+          <Text style={styles.fatalTitle}>Playback failed</Text>
+          <Text style={styles.fatalMessage}>
+            {tooSlow
+              ? tooSlowToPlayText(playback.instruction?.quality, playback.session?.transform)
+              : (fatal?.headline ?? errorText(playback.fatalError))}
+          </Text>
+          {tooSlow ? (
+            // The web client's two buttons (`PlayerScreen.tsx`, `tooSlow`); the list needs a session.
+            <View style={styles.fatalActions}>
+              <Button label="Try again" scope={FAILURE_SCOPE} defaultFocus onSelect={() => void runtime.retry()} />
+              {playback.session ? (
+                <Button
+                  label="Choose another quality"
+                  scope={FAILURE_SCOPE}
+                  onSelect={() => setOptionsOpen(true)}
+                  style={styles.fatalActionAfterFirst}
+                />
+              ) : null}
+            </View>
+          ) : null}
+          {fatal?.detail ? <Text style={styles.fatalCode}>{fatal.detail}</Text> : null}
+          {fatal?.code ? <Text style={styles.fatalCode}>{fatal.code}</Text> : null}
+          {trail.map((entry) => (
+            <TrailRow key={`${entry.atMs}-${entry.event}`} entry={entry} />
+          ))}
+        </View>
+      ) : null}
+
+      {/* Not tied to the chrome: a failover arrives long after the last press. */}
+      {diagnostics && !playback?.fatalError && liveTrail.length > 0 ? (
+        <View style={styles.liveTrail}>
+          {liveTrail.map((entry) => (
+            <TrailRow key={`${entry.atMs}-${entry.event}`} entry={entry} />
+          ))}
+        </View>
+      ) : null}
+
+      {/* The spinner, outside the chrome's gate so it outlives the chrome. */}
+      {showsBuffering(playback) ? (
+        <BufferingOverlay
+          delayMs={bufferingDelayMs(starting)}
           note={startWaitNotice(
-            playback.starting,
+            starting,
             startWaitMs,
-            playback.startProgress?.kind === 'start' ? startProgressText(playback.startProgress, streamStatus?.endpoint) : undefined,
+            playback?.startProgress?.kind === 'start'
+              ? startProgressText(playback.startProgress, streamStatus?.endpoint)
+              : undefined,
           )}
         />
-      )}
+      ) : null}
 
-      {fatalError && (
-        <div className="player-fatal-error" role="alert">
-          <strong>Playback failed</strong>
-          {/* Core's sentence, never `.message`, which carries envelopes and a node address. */}
-          <span>{tooSlow ? tooSlowToPlayText(runtimePlayback?.instruction?.quality, session?.transform) : playbackFailureHeadline(fatalError)}</span>
-          {tooSlow && (
-            <div className="player-failure-actions">
-              <button type="button" className="secondary-button" data-tv-focusable="true" data-tv-default-focus="true" onClick={() => { void runtime.retry(); }}>Try again</button>
-              {session && (
-                <button type="button" className="secondary-button" data-tv-focusable="true" onClick={() => setOptionsVisible(true)}>Choose another quality</button>
+      {chromeVisible || playback?.fatalError ? (
+        <View style={styles.chrome}>
+          {/* `.player-titlebar` */}
+          <View style={styles.titlebar}>
+            <View style={styles.titleCopy}>
+              <View style={styles.titleRow}>
+                <AvailabilityMarker media={media} style={styles.titleMarker} />
+                <Text style={styles.title} numberOfLines={1}>
+                  {media.title}
+                </Text>
+              </View>
+              {media.kind === 'episode' && episodeLabel(media) ? (
+                <Text style={styles.subtitle} numberOfLines={1}>
+                  {episodeLabel(media)}
+                </Text>
+              ) : null}
+            </View>
+            <View style={styles.streamStatus}>
+              {playback?.notice ? (
+                <Text style={styles.streamLine}>{playbackNoticeText(playback.notice, playback.instruction?.quality)}</Text>
+              ) : playback?.preparingSource ? (
+                // The endpoint is the one currently held (the node being replaced
+                // during a failover), or the stage a node reports.
+                <Text style={styles.streamLine}>
+                  {preparingStreamText(playback.startProgress, streamStatus?.endpoint, playback.pendingPreferences?.mode)}
+                </Text>
+              ) : (
+                <>
+                  {streamLines.map((line) => (
+                    <Text key={line} style={styles.streamLine}>
+                      {line}
+                    </Text>
+                  ))}
+                  {diagnostics && playback?.session ? (
+                    <Text style={styles.streamLine} numberOfLines={1}>
+                      session {playback.session.sessionId}
+                    </Text>
+                  ) : null}
+                </>
               )}
-            </div>
-          )}
-          {/* After the headline: the cap explains why recovery could not finish, not what went wrong. */}
-          {accountSessionLimitNotice(fatalError) && (
-            <span className="player-failure-notice">{accountSessionLimitNotice(fatalError)}</span>
-          )}
-          {failureTrail.length > 0 && (
-            <ol className="player-failure-trail">
-              {failureTrail.map((entry) => (
-                <li key={`${entry.atMs}-${entry.event}`}>
-                  <span>{(entry.atMs / 1_000).toFixed(1)}s</span>
-                  <span>{entry.event}</span>
-                  {entry.detail && <span>{entry.detail}</span>}
-                </li>
-              ))}
-            </ol>
-          )}
-        </div>
-      )}
+            </View>
+          </View>
 
-      <div
-        ref={chromeRef}
-        className={`player-chrome ${controlsVisible || fatalError ? 'visible' : ''}`}
-        onPointerDown={() => { if (webControls) showControls(); }}
-        onPointerEnter={(pointerEvent) => {
-          if (!webControls || (pointerEvent.pointerType && pointerEvent.pointerType !== 'mouse')) return;
-          hoveringChromeRef.current = true;
-          if (hideTimerRef.current !== undefined) {
-            window.clearTimeout(hideTimerRef.current);
-            hideTimerRef.current = undefined;
-          }
-        }}
-        onPointerLeave={(pointerEvent) => {
-          if (!webControls || (pointerEvent.pointerType && pointerEvent.pointerType !== 'mouse')) return;
-          hoveringChromeRef.current = false;
-          armControlsHide();
-        }}
-      >
-        <div className="player-titlebar">
-          <div className="player-title-copy">
-            <strong>{media.title}</strong>
-            {playerSubtitle && <span>{playerSubtitle}</span>}
-          </div>
-          <div className="player-stream-status" aria-live="polite">
-            {playbackNotice ? (
-              <small>{playbackNotice}</small>
-            ) : playback.preparingSource ? (
-              // The endpoint named is the one currently held; it flips to the replacement when that generation activates.
-              <small>{preparingStreamText(playback.startProgress, streamStatus?.endpoint, playback.pendingPreferences?.mode)}</small>
-            ) : (
-              <>
-                {/* `CONTAINER : endpoint` on one line. An absent half is omitted, never defaulted: a default
-                    would read as an answer. */}
-                {(streamStatus?.container || streamStatus?.endpoint) && (
-                  <small>{[streamStatus?.container, streamStatus?.endpoint].filter(Boolean).join(' : ')}</small>
-                )}
-                {streamStatus?.video && <small>{streamStatus.video}</small>}
-                {streamStatus?.audio && <small>{streamStatus.audio}</small>}
-                {streamStatus?.subtitle && <small>{streamStatus.subtitle}</small>}
-              </>
-            )}
-          </div>
-        </div>
-
-        {optionsVisible && (
-          session ? (
+          {/* `.player-options`: inside the chrome, above the scrubber. */}
+          {optionsOpen && playback?.session ? (
             <PlayerOptions
-              session={session}
-              offered={offered}
+              session={playback.session}
               pendingPreferences={playback.pendingPreferences}
-              instruction={runtimePlayback?.instruction}
-              versions={runtimePlayback?.versions}
-              onPlayVersion={(step) => { void runtime.playVersion(step); }}
-              capabilities={capabilities}
-              nodes={nodeChoices}
-              movingToNode={movingToNode}
-              onApply={reconfigure}
-              onSelectNode={onPinEndpoint ? selectNode : undefined}
-            />
-          ) : (
-            <div className="player-options player-options-loading" aria-live="polite">
-              Playback options are loading. Transport controls remain available.
-            </div>
-          )
-        )}
-
-        <div className="player-scrubber-row">
-          <span>{playbackTimeText(displayedProgress)}</span>
-          <div className="player-scrubber-shell">
-            {scrubberVisual}
-            <input
-              className="player-scrubber"
-              type="range"
-              min={0}
-              max={Math.max(1, duration)}
-              step={1_000}
-              value={displayedProgress}
-              aria-label="Playback position"
-              aria-valuetext={`${playbackTimeText(displayedProgress)} of ${playbackTimeText(duration)}`}
-              data-tv-focusable="true"
-              onChange={(changeEvent: ChangeEvent<HTMLInputElement>) => setScrubPosition(Number(changeEvent.target.value))}
-              onPointerUp={() => {
-                const position = scrubValueRef.current;
-                if (position !== undefined) seek(position);
+              instruction={playback.instruction}
+              versions={playback.versions}
+              // Core's `offeredModes` for the playing file, which follows
+              // failover and file switches: only what this set plays, unless
+              // the setting to offer everything is on.
+              offeredModes={playback.modes}
+              onApply={(update) => {
+                runtime.update(update);
+                showChrome();
               }}
-              onKeyDown={(keyEvent: ReactKeyboardEvent<HTMLInputElement>) => {
-                if (!samsungControls) return;
-                const direction = seekDirectionForKey(keyEvent.key, keyEvent.keyCode);
-                if (direction === undefined) return;
-                keyEvent.preventDefault();
-                keyEvent.stopPropagation();
-                // Only the preview moves; the seek is committed once, on release.
-                const { hold, deltaMs } = accelerateSeek(seekHoldRef.current, direction, Date.now());
-                seekHoldRef.current = hold;
-                const current = scrubValueRef.current ?? Math.min(duration, playback.intent.positionMs);
-                setScrubPosition(boundedPlayerSeekTarget(current, deltaMs, duration));
-                armControlsHide();
+              onPlayVersion={(step) => {
+                void runtime.playVersion(step);
+                showChrome();
               }}
-              onKeyUp={(keyEvent: ReactKeyboardEvent<HTMLInputElement>) => {
-                const seekKey = samsungControls
-                  ? seekDirectionForKey(keyEvent.key, keyEvent.keyCode)
-                  : undefined;
-                const commit = seekKey !== undefined || committingScrubberKey(keyEvent.key);
-                if (seekKey !== undefined) {
-                  keyEvent.preventDefault();
-                  keyEvent.stopPropagation();
-                  seekHoldRef.current = undefined;
-                }
-                const position = scrubValueRef.current;
-                if (position !== undefined && commit) seek(position);
-              }}
-              onBlur={() => {
-                const position = scrubValueRef.current;
-                if (position !== undefined) seek(position);
+              onDismiss={() => {
+                setOptionsOpen(false);
+                showChrome();
               }}
             />
-          </div>
-          <span>{playbackTimeText(duration)}</span>
-        </div>
+          ) : null}
 
-        <div className="player-button-row">
-          {webControls && (
-            <button type="button" data-tv-focusable="true" onClick={onMinimize} aria-label="Minimise player"><PlayerIcon name="back" /></button>
-          )}
-          {queuePosition && queuePosition.total > 1 && (
-            <button type="button" data-tv-focusable="true" onClick={() => { if (canPrevious) onPrevious(); else setLocalNotice('Already at the first item.'); }} aria-label="Previous item"><PlayerIcon name="previous" /></button>
-          )}
-          <button type="button" data-tv-focusable="true" onClick={playFromStart} aria-label="Play from start" title="Play from start"><RestartIcon /></button>
-          <button type="button" data-tv-focusable="true" onClick={() => seekBy(-10_000)} aria-label="Seek backward"><PlayerIcon name="rewind" /></button>
-          <button type="button" data-tv-focusable="true" data-tv-default-focus={samsungControls ? 'true' : undefined} onClick={() => setPaused(!pausedForControl)} aria-label={pausedForControl ? 'Play' : 'Pause'}>
-            {pausedForControl ? <PlayIcon /> : <PlayerIcon name="pause" />}
-          </button>
-          <button type="button" data-tv-focusable="true" onClick={() => seekBy(10_000)} aria-label="Seek forward"><PlayerIcon name="forward" /></button>
-          {queuePosition && queuePosition.total > 1 && (
-            <button type="button" data-tv-focusable="true" onClick={() => { if (canNext) onNext(); else setLocalNotice('Already at the last item.'); }} aria-label="Next item"><PlayerIcon name="next" /></button>
-          )}
-          <button
-            type="button"
-            data-tv-focusable="true"
-            className={optionsVisible ? 'selected' : undefined}
-            onClick={() => {
-              setOptionsVisible((visible) => !visible);
-              if (!interactionControlled) showControls();
-            }}
-            aria-label="Playback options"
-          >
-            <PlayerIcon name="options" />
-          </button>
-          {!samsungControls && <VolumeControl volume={volume} onChange={onVolumeChange} />}
-          {webControls && document.fullscreenEnabled && (
-            <button type="button" data-tv-focusable="true" onClick={() => void toggleFullscreen()} aria-label={fullscreen ? 'Exit fullscreen' : 'Fullscreen'} title={fullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
-              <PlayerIcon name={fullscreen ? 'fullscreen-exit' : 'fullscreen'} />
-            </button>
-          )}
-          <button type="button" data-tv-focusable="true" onClick={onStop} aria-label="Stop playback and close player" title="Close player"><PlayerIcon name="close" /></button>
-        </div>
-      </div>
+          {/* `.player-scrubber-row { grid-template-columns: 4.5rem 1fr 4.5rem }` */}
+          <View style={styles.scrubberRow}>
+            <Text style={styles.timeLabel}>{formatPlaybackTime(position)}</Text>
+            <Focusable
+              ring={false}
+              focusId={SCRUBBER_FOCUS_ID}
+              scope={CHROME_SCOPE}
+              style={styles.scrubberShell}
+              ownsDirection={(direction) => direction === 'left' || direction === 'right'}
+              onDirection={(direction) => seekByHeldKey(direction === 'left' ? -1 : 1)}
+            >
+              {({ focused }) => (
+                <View style={styles.scrubberVisual}>
+                  <View style={css(styles.scrubberBuffered, { width: `${bufferedPercent}%` })} />
+                  <View style={css(styles.scrubberPlayed, { width: `${playedPercent}%` })} />
+                  <View
+                    style={css(
+                      styles.scrubberThumb,
+                      { left: `${playedPercent}%` },
+                      focused && styles.scrubberThumbFocused,
+                    )}
+                  />
+                </View>
+              )}
+            </Focusable>
+            <Text style={css(styles.timeLabel, styles.timeLabelEnd)}>{formatPlaybackTime(duration)}</Text>
+          </View>
 
-      <div className="player-mini-chrome" aria-label="Now playing">
-        <button className="player-mini-copy" type="button" data-tv-focusable="true" onClick={onExpand} aria-label={`Open player for ${media.title}`}>
-          <span className="player-mini-title">{media.title}</span>
-          <span className="player-mini-subtitle">{fatalError ? `Playback failed · ${playbackFailureHeadline(fatalError)}` : playerSubtitle || 'Now playing'}</span>
-          <span className="player-mini-time">{playbackTimeText(displayedProgress)} / {playbackTimeText(duration)}</span>
-          <span className="player-mini-progress" aria-hidden="true"><span style={{ width: `${Math.min(100, displayedProgress / Math.max(1, duration) * 100)}%` }} /></span>
-        </button>
-        <div className="player-mini-controls">
-          {queuePosition && queuePosition.total > 1 && (
-            <button type="button" data-tv-focusable="true" onClick={() => { if (canPrevious) onPrevious(); else setLocalNotice('Already at the first item.'); }} aria-label="Previous item"><PlayerIcon name="previous" /></button>
-          )}
-          <button type="button" data-tv-focusable="true" data-tv-default-focus={samsungControls ? 'true' : undefined} onClick={() => setPaused(!pausedForControl)} aria-label={pausedForControl ? 'Play' : 'Pause'}>
-            {pausedForControl ? <PlayIcon /> : <PlayerIcon name="pause" />}
-          </button>
-          {queuePosition && queuePosition.total > 1 && (
-            <button type="button" data-tv-focusable="true" onClick={() => { if (canNext) onNext(); else setLocalNotice('Already at the last item.'); }} aria-label="Next item"><PlayerIcon name="next" /></button>
-          )}
-          {!samsungControls && <VolumeControl volume={volume} onChange={onVolumeChange} compact />}
-          <button type="button" data-tv-focusable="true" onClick={onExpand} aria-label="Open full player"><PlayerIcon name="expand" /></button>
-          <button type="button" data-tv-focusable="true" onClick={onStop} aria-label="Stop playback"><PlayerIcon name="close" /></button>
-        </div>
-      </div>
-    </section>
+          {/* `.player-button-row` */}
+          <View style={styles.buttonRow}>
+            <ChromeButton icon="restart" onSelect={() => { runtime.seek(0); showChrome(); }} />
+            {/* Always drawn, and disabled without a playable neighbour, so the row keeps its shape. */}
+            {isEpisode ? (
+              <ChromeButton
+                icon="previous"
+                disabled={!episodeNav?.previous || !availableToPlay(episodeNav.previous)}
+                onSelect={() => episodeNav?.previous && availableToPlay(episodeNav.previous) && onPlayEpisode?.(episodeNav.previous)}
+              />
+            ) : null}
+            {/* Fixed steps: the ladder belongs to the scrubber. */}
+            <ChromeButton icon="rewind" onSelect={() => { runtime.seekBy(-10_000); showChrome(); }} />
+            <ChromeButton
+              icon={paused ? 'play' : 'pause'}
+              focusId={PLAY_PAUSE_FOCUS_ID}
+              defaultFocus
+              onSelect={() => { runtime.setPaused(!paused); showChrome(); }}
+            />
+            <ChromeButton icon="forward" onSelect={() => { runtime.seekBy(10_000); showChrome(); }} />
+            {isEpisode ? (
+              <ChromeButton
+                icon="next"
+                disabled={!episodeNav?.next || !availableToPlay(episodeNav.next)}
+                onSelect={() => episodeNav?.next && availableToPlay(episodeNav.next) && onPlayEpisode?.(episodeNav.next)}
+              />
+            ) : null}
+            {/* No volume control: the remote's keys drive the set's output stage. */}
+            {playback?.session ? (
+              <ChromeButton icon="options" onSelect={() => setOptionsOpen(true)} />
+            ) : null}
+            <ChromeButton icon="close" onSelect={onClose} />
+          </View>
+        </View>
+      ) : null}
+    </View>
   );
 }
 
-/**
- * The modes this device can play the file in. Core's answer includes the node's operations and is
- * preferred; until it arrives the session's profile answers, and may offer a remux the node refuses.
- */
-export function modesToOffer(
-  fromCore: readonly OfferedMode[] | undefined,
-  session: PlaybackSession | undefined,
-  capabilities: PlaybackCapabilities | undefined,
-  overrides: PlaybackPolicyOverrides | undefined,
-  offerAll: boolean,
-): readonly OfferedMode[] | undefined {
-  if (fromCore) return fromCore;
-  if (!session || !capabilities) return undefined;
-  return offeredModes(technicalProfileFromSession(session), capabilities, { overrides, offerAll });
-}
-
-export function PlayerHost(props: Props) {
-  const { request, ...sessionProps } = props;
+/** One line of the diagnostics trail, on the failure overlay and the live one. */
+function TrailRow({ entry }: { entry: PlaybackFailureTrailEntry }): React.JSX.Element {
   return (
-    <PlayerSession
-      {...sessionProps}
-      media={request.media}
-      startPositionMs={request.startPositionMs}
-    />
+    <View style={styles.trailRow}>
+      <Text style={styles.trailTime}>{(entry.atMs / 1_000).toFixed(1)}s</Text>
+      <Text style={css(styles.trailEvent, entry.level === 'error' && styles.trailError)} numberOfLines={1}>
+        {entry.event}
+      </Text>
+      {entry.detail ? (
+        <Text style={styles.trailDetail} numberOfLines={1}>
+          {entry.detail}
+        </Text>
+      ) : null}
+    </View>
   );
 }
+
+/** `.player-button-row button { width/height: 3.25rem; border-radius: 50% }` */
+function ChromeButton({
+  icon,
+  onSelect,
+  focusId,
+  defaultFocus,
+  disabled,
+}: {
+  icon: PlayerIconName;
+  onSelect: () => void;
+  focusId?: string;
+  defaultFocus?: boolean;
+  disabled?: boolean;
+}): React.JSX.Element {
+  return (
+    <Focusable
+      ring={false}
+      scope={CHROME_SCOPE}
+      focusId={focusId}
+      defaultFocus={defaultFocus}
+      disabled={disabled}
+      onSelect={onSelect}
+      style={css(styles.chromeButton, disabled && styles.chromeButtonDisabled)}
+      focusedStyle={styles.chromeButtonFocused}
+    >
+      <PlayerIcon name={icon} />
+    </Focusable>
+  );
+}
+
+const BUTTON = rem(3.25);
+const THUMB = px(14);
+
+const styles = {
+  // `.player-button-row button:disabled { opacity: .35 }`
+  chromeButtonDisabled: {
+    opacity: disabledOpacity.playerButton,
+  },
+  // `.player-page { background: #050506 }` + `.player-presentation-full { inset: 0 }`
+  page: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+    backgroundColor: '#050506',
+  },
+  // `.player-host { position: absolute; inset: 0; background: black }`
+  host: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+    backgroundColor: '#000000',
+  },
+  // `.player-chrome { left/right/bottom: 0; padding: 1.35rem 3vw 1.25rem; background: #0505069c }`
+  chrome: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    paddingTop: rem(1.35),
+    paddingBottom: rem(1.25),
+    paddingLeft: pageGutter,
+    paddingRight: pageGutter,
+    backgroundColor: cssColour('#0505069c'),
+  },
+  // `.player-titlebar { display: flex; align-items: end; justify-content: space-between; gap: 2rem; margin-bottom: 1.3rem }`
+  titlebar: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    justifyContent: 'space-between',
+    marginBottom: rem(1.3),
+  },
+  titleCopy: {
+    flexShrink: 1,
+    marginRight: rem(2),
+  },
+  // `.player-titlebar strong { font-size: clamp(1.3rem,2.2vw,2rem); color: #dedee2 }`
+  titleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  titleMarker: {
+    marginRight: rem(0.6),
+  },
+  title: {
+    flexShrink: 1,
+    fontSize: type.playerTitle,
+    color: colour.heading,
+    fontWeight: font.weightMedium,
+  },
+  // `.player-titlebar span { margin-top: .2rem; color: #c8c8cb }`
+  subtitle: {
+    marginTop: rem(0.2),
+    color: '#c8c8cb',
+    fontSize: type.body,
+  },
+  // `.player-stream-status { justify-items: end; gap: .18rem; color: #9b9ba3; text-align: right }`
+  streamStatus: {
+    alignItems: 'flex-end',
+  },
+  streamLine: {
+    marginTop: rem(0.18),
+    color: '#9b9ba3',
+    fontSize: type.small,
+    textAlign: 'right',
+  },
+  scrubberRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  // `.player-scrubber-row span { font-size: .82rem; font-variant-numeric: tabular-nums }`
+  timeLabel: {
+    width: rem(4.5),
+    color: '#c8c8cb',
+    fontSize: type.small,
+    ...tabularNumbers,
+  },
+  timeLabelEnd: {
+    textAlign: 'right',
+  },
+  // `.player-scrubber-shell { height: 1.1rem }`, with the row's `gap: 1rem` each side.
+  scrubberShell: {
+    flex: 1,
+    height: rem(1.1),
+    marginLeft: rem(1),
+    marginRight: rem(1),
+    justifyContent: 'center',
+  },
+  // `.player-scrubber-visual { height: 4px; border-radius: 99px; background: #e7e7ea }`
+  scrubberVisual: {
+    height: px(4),
+    borderRadius: radius.pill,
+    backgroundColor: colour.scrubberTrack,
+  },
+  // `.player-scrubber-buffered { background: #d7a3af }`
+  scrubberBuffered: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    backgroundColor: colour.scrubberBuffered,
+  },
+  // `.player-scrubber-played { background: #620014; opacity: .84 }`
+  scrubberPlayed: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    backgroundColor: colour.scrubberPlayed,
+    opacity: 0.84,
+  },
+  // `.player-scrubber::-webkit-slider-thumb { width/height: 14px; border-radius: 50%; background: var(--red-400) }`
+  scrubberThumb: {
+    position: 'absolute',
+    top: (px(4) - THUMB) / 2,
+    width: THUMB,
+    height: THUMB,
+    marginLeft: -THUMB / 2,
+    borderRadius: THUMB / 2,
+    borderWidth: 1,
+    borderStyle: 'solid',
+    borderColor: cssColour('#ffffffa8'),
+    backgroundColor: colour.red400,
+  },
+  scrubberThumbFocused: {
+    borderColor: colour.text,
+    transform: 'scale(1.25)',
+  },
+  // `.player-button-row { justify-content: center; gap: .7rem; margin-top: 1.25rem }`
+  buttonRow: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginTop: rem(1.25),
+  },
+  // `.player-button-row button { width/height: 3.25rem; border: 1px solid #48484f; border-radius: 50%; background: #080809d6 }`
+  chromeButton: {
+    width: BUTTON,
+    height: BUTTON,
+    marginLeft: rem(0.35),
+    marginRight: rem(0.35),
+    borderRadius: BUTTON / 2,
+    borderWidth: 1,
+    borderStyle: 'solid',
+    borderColor: '#48484f',
+    backgroundColor: cssColour('#080809d6'),
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  // `:hover/:focus-visible { background: #160004e8; border-color: #620014 }`
+  chromeButtonFocused: {
+    backgroundColor: cssColour('#160004e8'),
+    borderColor: '#620014',
+  },
+  // `.player-fatal-error { top: 42%; border-radius: .7rem; background: #09090be8 }`
+  fatalError: {
+    position: 'absolute',
+    left: '10%',
+    right: '10%',
+    top: '38%',
+    paddingTop: rem(1.1),
+    paddingBottom: rem(1.1),
+    paddingLeft: rem(1.25),
+    paddingRight: rem(1.25),
+    borderWidth: 1,
+    borderStyle: 'solid',
+    borderColor: cssColour('#ffffff16'),
+    borderRadius: rem(0.7),
+    backgroundColor: cssColour('#09090be8'),
+    alignItems: 'center',
+  },
+  fatalTitle: {
+    color: colour.heading,
+    fontSize: rem(1.05),
+    fontWeight: font.weightSemibold,
+  },
+  fatalMessage: {
+    marginTop: rem(0.45),
+    color: colour.error,
+    textAlign: 'center',
+    fontSize: type.body,
+  },
+  /** The failure's buttons in a row, spaced as the web's `.secondary-button`s sit. */
+  fatalActions: {
+    flexDirection: 'row',
+    marginTop: rem(1.05),
+  },
+  fatalActionAfterFirst: {
+    marginLeft: rem(0.6),
+  },
+  /** The server's code, as small print. */
+  fatalCode: {
+    marginTop: rem(0.45),
+    color: '#7a7a83',
+    fontSize: type.small,
+    ...tabularNumbers,
+  },
+  /** Top-left, clear of the bottom-anchored chrome; narrow so a long detail truncates. */
+  liveTrail: {
+    position: 'absolute',
+    left: pageGutter,
+    top: rem(1),
+    maxWidth: '72%',
+    paddingTop: rem(0.4),
+    paddingBottom: rem(0.4),
+    paddingLeft: rem(0.6),
+    paddingRight: rem(0.6),
+    borderRadius: rem(0.4),
+    backgroundColor: cssColour('#09090bb8'),
+  },
+  /** Left-aligned and full width: read as a column of times. */
+  trailRow: {
+    flexDirection: 'row',
+    alignSelf: 'stretch',
+    alignItems: 'baseline',
+    marginTop: rem(0.15),
+  },
+  trailTime: {
+    width: rem(3.2),
+    marginRight: rem(0.5),
+    textAlign: 'right',
+    color: '#7a7a83',
+    fontSize: type.small,
+    ...tabularNumbers,
+  },
+  trailEvent: {
+    marginRight: rem(0.5),
+    color: '#c8c8cb',
+    fontSize: type.small,
+  },
+  trailError: {
+    color: colour.error,
+  },
+  // Truncates, so one long line cannot push older entries off the overlay.
+  trailDetail: {
+    flexShrink: 1,
+    color: '#7a7a83',
+    fontSize: type.small,
+  },
+} satisfies Record<string, Style>;

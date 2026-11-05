@@ -1,26 +1,28 @@
-import { machaHost } from '@machafoundation/core';
+import { nativeStorage } from '../state/storage';
+import { applyDiagnosticsLevel } from './playbackLog';
 
 /**
- * Whether the playback failure screen prints the evidence behind a failure or only the message.
- * Off by default: the trail is for debugging a device with no console. Read when a failure lands.
+ * Whether the failure overlay prints the diagnostics trail or only the message.
+ * Off by default. Rule and storage key match the web client's
+ * `diagnostics/failureTrailSetting.ts`.
  */
 const FAILURE_TRAIL_KEY = 'macha-playback-failure-trail-v1';
 
-/** Storage can throw (a private window, no quota); absent and unreadable both mean off. */
+/** Read when a failure lands. `null` before `hydrateStorage()` completes means off. */
 export function failureTrailEnabled(): boolean {
-  try {
-    return machaHost().storage.getItem(FAILURE_TRAIL_KEY) === 'on';
-  } catch {
-    return false;
-  }
+  return nativeStorage.getItem(FAILURE_TRAIL_KEY) === 'on';
 }
 
 export function setFailureTrailEnabled(enabled: boolean): void {
-  try {
-    const storage = machaHost().storage;
-    if (enabled) storage.setItem(FAILURE_TRAIL_KEY, 'on');
-    else storage.removeItem(FAILURE_TRAIL_KEY);
-  } catch {
-    // The control still governs this session; only the memory of it is lost.
-  }
+  if (enabled) nativeStorage.setItem(FAILURE_TRAIL_KEY, 'on');
+  else nativeStorage.removeItem(FAILURE_TRAIL_KEY);
+  applyDiagnosticsLevel(enabled);
+}
+
+/**
+ * Call once after storage hydrates: `playbackLog` configures itself at import,
+ * before the setting can be read.
+ */
+export function syncDiagnosticsLevel(): void {
+  applyDiagnosticsLevel(failureTrailEnabled());
 }

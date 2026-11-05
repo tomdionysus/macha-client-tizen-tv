@@ -1,52 +1,120 @@
 import { describe, expect, it } from 'vitest';
 import type { ClientLogEntry } from '@machafoundation/core';
-import { playbackFailureTrail } from './failureTrail';
+import { playbackFailureTrail, trailSignature } from './failureTrail';
 
-function entry(partial: Partial<ClientLogEntry>): ClientLogEntry {
+function entry(overrides: Partial<ClientLogEntry> = {}): ClientLogEntry {
   return {
     sequence: 1,
-    timestamp: '2026-09-09T10:00:00.000Z',
-    elapsedMs: 0,
+    timestamp: '2026-09-13T00:00:00.000Z',
+    elapsedMs: 1_000,
     level: 'warn',
-    scope: 'playback.cluster',
-    event: 'generation-attempt-failed',
-    ...partial,
+    scope: 'playback',
+    event: 'first-fragment-held',
+    ...overrides,
   };
 }
 
-describe('the evidence shown behind a playback failure', () => {
-  it('keeps only what went wrong, newest last', () => {
+describe('playbackFailureTrail', () => {
+  it('keeps only warnings and errors', () => {
     const trail = playbackFailureTrail([
-      entry({ level: 'info', event: 'source-activate' }),
-      entry({ level: 'debug', event: 'media-element-reused' }),
-      entry({ level: 'warn', elapsedMs: 12_340, event: 'source-failover-start' }),
-      entry({ level: 'error', elapsedMs: 27_100, event: 'source-failover-exhausted' }),
+      entry({ level: 'debug', event: 'tick' }),
+      entry({ level: 'info', event: 'first-fragment' }),
+      entry({ level: 'warn', event: 'stalled' }),
+      entry({ level: 'error', event: 'failure' }),
     ]);
 
-    expect(trail.map((line) => line.event)).toEqual([
-      'playback.cluster source-failover-start',
-      'playback.cluster source-failover-exhausted',
+    expect(trail.map((line) => line.event)).toEqual(['playback stalled', 'playback failure']);
+  });
+
+  it('keeps the most recent entries, not the first', () => {
+    const many = Array.from({ length: 40 }, (_, index) =>
+      entry({ event: `step-${index}`, elapsedMs: index }));
+
+    const trail = playbackFailureTrail(many);
+
+    expect(trail).toHaveLength(12);
+    expect(trail.at(-1)?.event).toBe('playback step-39');
+  });
+
+  it('reads the message out of an Error rather than printing {}', () => {
+    const trail = playbackFailureTrail([
+      entry({ data: { cause: new Error('node refused the fragment') } }),
     ]);
-    expect(trail[0].atMs).toBe(12_340);
+
+    expect(trail[0]?.detail).toContain('node refused the fragment');
   });
 
-  it('reads out the message of an error carried as data, which JSON alone renders as {}', () => {
-    const [line] = playbackFailureTrail([
-      entry({ data: { endpointId: 'gbni-2', error: new Error('connection refused') } }),
+  it('reads a bare Error too', () => {
+    const trail = playbackFailureTrail([entry({ data: new Error('bare') })]);
+
+    expect(trail[0]?.detail).toBe('bare');
+  });
+
+  it('truncates a long detail so older entries survive on screen', () => {
+    const trail = playbackFailureTrail([entry({ data: { url: 'x'.repeat(500) } })]);
+
+    expect(trail[0]?.detail?.length).toBeLessThan(140);
+    expect(trail[0]?.detail?.endsWith('…')).toBe(true);
+  });
+
+  it('omits a detail rather than showing an empty object', () => {
+    const trail = playbackFailureTrail([entry({ data: {} })]);
+
+    expect(trail[0]?.detail).toBeUndefined();
+  });
+
+  it('survives a circular structure', () => {
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+
+    const trail = playbackFailureTrail([entry({ data: circular })]);
+
+    expect(trail).toHaveLength(1);
+    expect(trail[0]?.detail).toBeUndefined();
+  });
+
+  it('carries the elapsed time, which is what distinguishes the causes', () => {
+    const trail = playbackFailureTrail([
+      entry({ elapsedMs: 4_200, event: 'stalled' }),
+      entry({ elapsedMs: 11_300, level: 'error', event: 'failure' }),
     ]);
 
-    expect(line.detail).toContain('connection refused');
-    expect(line.detail).toContain('gbni-2');
+    expect(trail.map((line) => line.atMs)).toEqual([4_200, 11_300]);
+  });
+});
+
+describe('trailSignature', () => {
+  it('is stable while nothing new is logged', () => {
+    const trail = playbackFailureTrail([entry({ event: 'stalled' })]);
+
+    expect(trailSignature(trail)).toBe(trailSignature(playbackFailureTrail([
+      entry({ event: 'stalled' }),
+    ])));
   });
 
-  it('says nothing rather than something meaningless for an entry carrying no detail', () => {
-    expect(playbackFailureTrail([entry({})])[0].detail).toBeUndefined();
-    expect(playbackFailureTrail([entry({ data: {} })])[0].detail).toBeUndefined();
+  it('changes when a line arrives', () => {
+    const before = playbackFailureTrail([entry({ elapsedMs: 1_000, event: 'stalled' })]);
+    const after = playbackFailureTrail([
+      entry({ elapsedMs: 1_000, event: 'stalled' }),
+      entry({ elapsedMs: 2_400, event: 'standby-promoted' }),
+    ]);
+
+    expect(trailSignature(after)).not.toBe(trailSignature(before));
   });
 
-  it('bounds a long detail so one line cannot fill the screen', () => {
-    const [line] = playbackFailureTrail([entry({ data: { url: 'x'.repeat(500) } })]);
-    expect(line.detail).toHaveLength(161);
-    expect(line.detail?.endsWith('…')).toBe(true);
+  it('changes when the tail moves under a full buffer', () => {
+    // The count stops rising once the trail is at its cap.
+    const many = (from: number) => playbackFailureTrail(
+      Array.from({ length: 20 }, (_, index) => entry({
+        event: `step-${from + index}`,
+        elapsedMs: (from + index) * 100,
+      })),
+    );
+
+    expect(trailSignature(many(1))).not.toBe(trailSignature(many(0)));
+  });
+
+  it('answers for an empty trail rather than throwing', () => {
+    expect(trailSignature([])).toBe('');
   });
 });

@@ -1,811 +1,672 @@
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore, type ReactElement } from 'react';
-import { Navigate, NavLink, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import type { CatalogueApi, CatalogueMediaProfile, ManageApi, PlaybackFactsApi, PlaybackMediaFacts } from '@machafoundation/core';
-import type { MediaApi } from '@machafoundation/core';
-import { AppLogo } from './components/AppLogo';
-import { MusicNav } from './components/MusicNav';
-import { BooksNav } from './components/BooksNav';
-import { StatusNav } from './components/StatusNav';
-import { ManageNav } from './components/ManageNav';
-import { ImportNav } from './components/ImportNav';
-import { machaLogoUrl as logoUrl } from './uiAssets';
-import { useTvNavigation } from './hooks/useTvNavigation';
-import { useEndpointHealthMonitor } from './cluster/useEndpointHealthMonitor';
-import { useSameOriginEndpoint } from './cluster/sameOriginEndpoint';
-import { samsungBackTarget } from './platform/samsungBackNavigation';
-import type { Platform } from '@machafoundation/core';
-import { buildPlatformTraits, isTvBuild } from './platform/traits';
-import type { PlaybackResolver } from '@machafoundation/core';
-import { reportClusterReachable, SERVER_REACHABLE_EVENT, SERVER_UNREACHABLE_EVENT } from '@machafoundation/core';
-import { SERVER_UNREACHABLE_TEXT, SIGN_OUT_UNCONFIRMED_TEXT } from './text/viewerText';
-import type { MediaSummary, PlaybackProgress, SeasonSummary } from '@machafoundation/core';
-import { ContinueWatchingStore } from '@machafoundation/core';
-import { hasRole, sessionManager, sessionPermits, type UserRole } from '@machafoundation/core';
-import { useCurrentSession } from './app/useCurrentSession';
-import { PlaybackQueueStore } from '@machafoundation/core';
-import { MusicPlaylistStore, ReadingPositionStore } from '@machafoundation/core';
-import { VolumeStore } from './state/volume';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  getClientId,
-  getBootstrapEndpoints,
-  getDiscoveredEndpoints,
-  setBootstrapEndpoints as persistBootstrapEndpoints,
-} from './state/client';
+  sessionManager,
+  type Episode,
+  type MediaSummary,
+  type PlaybackProgress,
+  type VersionStep,
+} from '@machafoundation/core';
+import { Image, View, type Style } from './components/primitives';
+import { MachaProvider, useMacha } from './app/MachaProvider';
+import { usePlaybackRuntime, type PageExitHandlers } from './app/usePlaybackRuntime';
+import { useContinueWatchingWriter } from './app/useContinueWatchingWriter';
+import { backAction, TOP_LEVEL } from './app/backAction';
+import { exitAfterFlush } from './app/appExit';
+import { routeFocus } from './app/routeFocus';
+import { flushStorage, hydrateStorage } from './state/storage';
+import { EXIT_FLUSH_BUDGET_MS } from './player/timingBudgets';
+import { syncDiagnosticsLevel } from './diagnostics/failureTrailSetting';
+import { useTvNavigation } from './hooks/useTvNavigation';
+import { backHandler } from './hooks/backHandler';
+import { tvFocus } from './hooks/tvFocus';
+import { isMediaFocusId, mediaFocusId } from './hooks/useAlphabetIndex';
+import { libraryTrail, type KnownAncestry } from './app/libraryTrail';
+import { SIGN_OUT_REVOKE_FAILED } from './text/viewerText';
+import { useEpisodeNeighbours } from './app/useEpisodeNeighbours';
+import { episodeToPlayOnEnd } from './app/autoAdvance';
+import { availableToPlay } from '@machafoundation/core';
+import { startPreferences } from './app/startPreferences';
+import { attributableProgress } from './app/progressAttribution';
+import { orphanedSessions } from './state/liveSessions';
+import { playbackLog } from './diagnostics/playbackLog';
+import { tizenPlatform } from './platform/TizenPlatform';
+import { deviceQualityCeiling } from './player/qualityCeiling';
+import { qualityPreferenceStore } from './state/qualityPreference';
+import { TopBar, type NavItem } from './components/TopBar';
+import { ConfirmDialog } from './components/ConfirmDialog';
+import { Loading } from './components/Status';
 import { HomeScreen } from './screens/HomeScreen';
 import { LibraryScreen } from './screens/LibraryScreen';
-import { UsersScreen } from './screens/UsersScreen';
-import { AccountScreen, ChangePasswordScreen } from './screens/AccountScreen';
-import { LoginScreen } from './screens/LoginScreen';
-import { AccountMenu } from './components/AccountMenu';
-import { SettingsIcon } from './components/ManageIcons';
-import { MusicScreen } from './screens/MusicScreen';
-import { MusicPlaylistScreen } from './screens/MusicPlaylistScreen';
-import { SearchScreen } from './screens/SearchScreen';
 import { DetailScreen } from './screens/DetailScreen';
-import { SeriesScreen } from './screens/SeriesScreen';
-import { SeasonScreen } from './screens/SeasonScreen';
-import { ArtistScreen } from './screens/ArtistScreen';
-import { AlbumScreen } from './screens/AlbumScreen';
-import { BooksScreen } from './screens/BooksScreen';
-import { BookScreen } from './screens/BookScreen';
-import { BookCollectionScreen } from './screens/BookCollectionScreen';
-import { ReaderScreen } from './screens/ReaderScreen';
-import { PlayerHost } from './screens/PlayerScreen';
+import { SeriesScreen, SeasonScreen } from './screens/SeriesScreen';
+import { PlayerScreen } from './screens/PlayerScreen';
 import { SettingsScreen } from './screens/SettingsScreen';
-import { SponsorScreen } from './screens/SponsorScreen';
-import { MetadataEditorScreen } from './screens/MetadataEditorScreen';
-import { IngestScreen } from './screens/IngestScreen';
-import { IngestJobDetailScreen } from './screens/IngestJobDetailScreen';
-import { TorrentDetailScreen } from './screens/TorrentDetailScreen';
-import { ManageScreen, type ManageSection } from './screens/ManageScreen';
-import { UnmatchedFilePage } from './screens/identify/UnmatchedFilePage';
-import { NodeStatusScreen, StatusScreen } from './screens/StatusScreen';
-import { isBookKind, isConversionFormat, pathForMedia, routes } from '@machafoundation/core';
-import { playerRouteItemId } from '@machafoundation/core';
-import { useMachaServices } from './app/useMachaServices';
-import { useSession } from './app/useSession';
-import { EndpointRegistry, seedEndpoints } from '@machafoundation/core';
-import { preferredEndpointForNode } from './cluster/preferredEndpoint';
-import { lockoutNotice, lockoutReason } from './app/lockoutNotice';
-import { useEndpointCandidates } from './cluster/useEndpointCandidates';
-import { setMediaTransferListener } from './playback/directPlayReadAhead';
-import { setKeyframeSource } from './platform/WebPlatform';
-import { Loading } from './components/Status';
-import { useMediaRouteBack } from './app/useMediaRouteBack';
-import { useMusicController } from './app/useMusicController';
-import { usePlaybackRuntime } from './app/usePlaybackRuntime';
-import { measureStartCosts } from './playback/nodeStartCosts';
-import { usePlaybackController } from './app/usePlaybackController';
-import { playbackVersions, qualityCeiling, QualityPreferenceStore, technicalProfileFromCatalogue, type PlaybackPolicyOverrides, type PlaybackVersions, type VersionStep } from '@machafoundation/core';
-import type { DisplayResolution } from './platform/displayResolution';
-import { ConnectionGateScreen } from './screens/ConnectionGateScreen';
-import { initialConnectionGate, normalizeConnectionEndpoints, shouldEnterConnectionGate, type ConnectionGate } from '@machafoundation/core';
-
-interface Props {
-  platform: Platform;
-  apiOverride?: MediaApi;
-  playbackOverride?: PlaybackResolver;
-}
+import { SearchScreen } from './screens/SearchScreen';
+import { StatusScreen } from './screens/StatusScreen';
+import { MusicScreen } from './screens/MusicScreen';
+import { LoginScreen } from './screens/LoginScreen';
+import { OfflineScreen } from './screens/OfflineScreen';
+import { useCurrentSession } from './app/useCurrentSession';
+import {
+  accessState,
+  lapsedIdentity,
+  useAccessLatched,
+  useSessionFacts,
+  type AdmissionEnded,
+} from './app/access';
+import { machaIconUrl } from './uiAssets';
+import { colour, screenSize } from './styles/theme';
 
 /**
- * `needs` is the role that shows a section. Everything reading the catalogue
- * needs `media_viewer`, Home included. Manage has none: either of two roles
- * reaches it, so the render site decides.
+ * The web client's navigation less Import and Manage, which want a keyboard.
+ * Settings is the cog at the trailing edge, as there.
  */
-export const navItems = [
-  { to: routes.home, label: 'Home', end: true, needs: 'media_viewer' },
-  { to: routes.movies, label: 'Movies', end: false, needs: 'media_viewer' },
-  { to: routes.series, label: 'TV Shows', end: false, needs: 'media_viewer' },
-  { to: routes.music, label: 'Music', end: false, needs: 'media_viewer' },
-  { to: routes.books, label: 'Books', end: false, needs: 'media_viewer' },
-  { to: routes.search, label: 'Search', end: false, needs: 'media_viewer' },
-  { to: routes.ingest, label: 'Import', end: false, needs: 'importer' },
-  { to: routes.status, label: 'Status', end: false, needs: 'view_status' },
-  { to: routes.manage, label: 'Manage', end: false, needs: undefined },
-] as const satisfies readonly { to: string; label: string; end: boolean; needs?: UserRole }[];
+const NAV: NavItem[] = [
+  { key: 'home', label: 'Home' },
+  { key: 'movies', label: 'Movies' },
+  { key: 'shows', label: 'TV Shows' },
+  { key: 'music', label: 'Music' },
+  { key: 'search', label: 'Search' },
+  { key: 'status', label: 'Status' },
+];
 
-/**
- * Where a viewer goes after signing in: the path the login redirect recorded,
- * else `landing`. `from` comes from `location.state`, which a viewer can author,
- * so only a same-document absolute path other than `/login` is honoured. The
- * route guards decide whether the account may see it.
- */
-export function postSignInDestination(from: unknown, landing: string): string {
-  if (typeof from !== 'string') return landing;
-  if (!from.startsWith('/') || from.startsWith('//')) return landing;
-  return from === routes.login ? landing : from;
+type Route =
+  | { name: 'home' }
+  | { name: 'movies' }
+  | { name: 'shows' }
+  | { name: 'music' }
+  | { name: 'search' }
+  | { name: 'status' }
+  | { name: 'settings' }
+  | { name: 'detail'; media: MediaSummary }
+  | { name: 'series'; media: MediaSummary }
+  | { name: 'season'; media: MediaSummary }
+  | { name: 'player'; media: MediaSummary };
+
+
+/** A show or season is not playable, so opening one drills in. */
+function routeForMedia(media: MediaSummary): Route {
+  if (media.kind === 'show') return { name: 'series', media };
+  if (media.kind === 'season') return { name: 'season', media };
+  return { name: 'detail', media };
 }
 
-function required(value: string | undefined, name: string): string {
-  if (!value) throw new Error(`Missing route parameter: ${name}`);
-  return value;
-}
-
-function DetailRoute({ api, onPlay, onPlayFromStart, loadFiles, versionsOf, onPlayVersion, progressById, parameter, onEdit, onMediaProfile }: {
-  api: MediaApi;
-  onPlay: (item: MediaSummary) => void;
-  onPlayFromStart: (item: MediaSummary) => void;
-  loadFiles?: (item: MediaSummary) => Promise<PlaybackMediaFacts[]>;
-  versionsOf?: (item: MediaSummary, files: PlaybackMediaFacts[]) => Promise<PlaybackVersions>;
-  onPlayVersion?: (item: MediaSummary, version: VersionStep) => void;
-  progressById: Map<string, PlaybackProgress>;
-  parameter: 'movieId' | 'episodeId' | 'trackId' | 'itemId';
-  onEdit?: (id: string) => void;
-  onMediaProfile?: (profile: CatalogueMediaProfile) => void;
-}) {
-  const params = useParams();
-  const back = useMediaRouteBack(api);
-  const itemId = required(params[parameter], parameter);
-  return (
-    <DetailScreen
-      api={api}
-      itemId={itemId}
-      onBack={back}
-      onPlay={onPlay}
-      onPlayFromStart={onPlayFromStart}
-      loadFiles={loadFiles}
-      versionsOf={versionsOf}
-      onPlayVersion={onPlayVersion}
-      progress={progressById.get(itemId)}
-      onEdit={onEdit ? () => onEdit(itemId) : undefined}
-      onMediaProfile={onMediaProfile}
-    />
-  );
-}
-
-function SeriesRoute({ api, onOpenSeason, onEdit }: { api: MediaApi; onOpenSeason: (season: SeasonSummary) => void; onEdit?: (id: string) => void }) {
-  const { seriesId } = useParams();
-  const back = useMediaRouteBack(api);
-  const resolvedSeriesId = required(seriesId, 'seriesId');
-  return (
-    <SeriesScreen
-      api={api}
-      seriesId={resolvedSeriesId}
-      onBack={back}
-      onOpenSeason={onOpenSeason}
-      onEdit={onEdit ? () => onEdit(resolvedSeriesId) : undefined}
-    />
-  );
-}
-
-function SeasonRoute({ api, progress, onEdit }: {
-  api: MediaApi;
-  progress: Map<string, PlaybackProgress>;
-  onEdit?: (id: string) => void;
-}) {
-  const { seriesId, seasonId } = useParams();
-  const navigate = useNavigate();
-  const back = useMediaRouteBack(api);
-  const resolvedSeriesId = required(seriesId, 'seriesId');
-  const resolvedSeasonId = required(seasonId, 'seasonId');
-  return (
-    <SeasonScreen
-      api={api}
-      seriesId={resolvedSeriesId}
-      seasonId={resolvedSeasonId}
-      onBack={back}
-      progress={progress}
-      onOpenEpisode={(episode) => navigate(routes.episode(episode.id))}
-      onEdit={onEdit ? () => onEdit(resolvedSeasonId) : undefined}
-    />
-  );
-}
-
-function ArtistRoute({ api, onOpenAlbum, onAddToPlaylist, onPlayNext, onPlayLater, onShuffle, onEdit }: {
-  api: MediaApi;
-  onOpenAlbum: (album: MediaSummary) => void;
-  onAddToPlaylist: (album: MediaSummary) => void;
-  onPlayNext: (album: MediaSummary) => void;
-  onPlayLater: (album: MediaSummary) => void;
-  onShuffle: (album: MediaSummary) => void;
-  onEdit?: (id: string) => void;
-}) {
-  const { artistId } = useParams();
-  const back = useMediaRouteBack(api, routes.musicArtists);
-  const resolvedArtistId = required(artistId, 'artistId');
-  return (
-    <ArtistScreen
-      api={api}
-      artistId={resolvedArtistId}
-      onBack={back}
-      onOpenAlbum={onOpenAlbum}
-      onAddToPlaylist={onAddToPlaylist}
-      onPlayNext={onPlayNext}
-      onPlayLater={onPlayLater}
-      onShuffle={onShuffle}
-      onEdit={onEdit ? () => onEdit(resolvedArtistId) : undefined}
-    />
-  );
-}
-
-function AlbumRoute({ api, onPlay, onPlayAll, onOpenTrack, onAddToPlaylist, onPlayNext, onPlayLater, onShuffle, onEdit }: {
-  api: MediaApi;
-  onPlay: (track: MediaSummary, queue: MediaSummary[], queueIndex: number) => void;
-  onPlayAll: (album: MediaSummary) => void;
-  onOpenTrack: (track: MediaSummary) => void;
-  onAddToPlaylist: (item: MediaSummary) => void;
-  onPlayNext: (item: MediaSummary) => void;
-  onPlayLater: (item: MediaSummary) => void;
-  onShuffle: (item: MediaSummary) => void;
-  onEdit?: (id: string) => void;
-}) {
-  const { albumId } = useParams();
-  const back = useMediaRouteBack(api);
-  const resolvedAlbumId = required(albumId, 'albumId');
-  return (
-    <AlbumScreen
-      api={api}
-      albumId={resolvedAlbumId}
-      onBack={back}
-      onPlayTrack={onPlay}
-      onPlayAll={onPlayAll}
-      onOpenTrack={onOpenTrack}
-      onAddToPlaylist={onAddToPlaylist}
-      onPlayNext={onPlayNext}
-      onPlayLater={onPlayLater}
-      onShuffle={onShuffle}
-      onEdit={onEdit ? () => onEdit(resolvedAlbumId) : undefined}
-    />
-  );
-}
-
-function BookRoute({ api, catalogue, positions, onEdit }: { api: MediaApi; catalogue: CatalogueApi; positions: ReadingPositionStore; onEdit?: (id: string) => void }) {
-  const { bookId } = useParams();
-  const navigate = useNavigate();
-  const back = useMediaRouteBack(api);
-  const resolvedBookId = required(bookId, 'bookId');
-  return (
-    <BookScreen
-      api={api}
-      catalogue={catalogue}
-      positions={positions}
-      bookId={resolvedBookId}
-      onBack={back}
-      onRead={(id, mediaId, as) => navigate(`${routes.reader(id)}?${new URLSearchParams({ file: mediaId, ...(as ? { as } : {}) })}`)}
-      onEdit={onEdit ? () => onEdit(resolvedBookId) : undefined}
-    />
-  );
-}
-
-function BookCollectionRoute({ api, kind, onOpenBook, onEdit }: {
-  api: MediaApi;
-  kind: 'author' | 'series';
-  onOpenBook: (book: MediaSummary) => void;
-  onEdit?: (id: string) => void;
-}) {
-  const { collectionId } = useParams();
-  const back = useMediaRouteBack(api);
-  const id = required(collectionId, 'collectionId');
-  return <BookCollectionScreen api={api} kind={kind} id={id} onBack={back} onOpenBook={onOpenBook} onEdit={onEdit ? () => onEdit(id) : undefined} />;
-}
-
-/** The file read is `?file=`, one of the book's media ids; `?as=` reads it converted to that format. */
-function ReaderRoute({ api, catalogue, positions }: { api: MediaApi; catalogue: CatalogueApi; positions: ReadingPositionStore }) {
-  const { bookId } = useParams();
-  const [search] = useSearchParams();
-  const navigate = useNavigate();
-  const resolvedBookId = required(bookId, 'bookId');
-  const mediaId = search.get('file');
-  const as = search.get('as') ?? undefined;
-  if (!mediaId) return <Navigate to={routes.book(resolvedBookId)} replace />;
-  return <ReaderScreen api={api} catalogue={catalogue} positions={positions} bookId={resolvedBookId} mediaId={mediaId} as={as !== undefined && isConversionFormat(as) ? as : undefined} onBack={() => navigate(routes.book(resolvedBookId))} />;
-}
-
-function MetadataEditorRoute({ api, facts, manage }: { api: CatalogueApi; facts: PlaybackFactsApi; manage?: ManageApi }) {
-  const { itemId } = useParams();
-  const navigate = useNavigate();
-  return (
-    <MetadataEditorScreen
-      api={api}
-      facts={facts}
-      manage={manage}
-      itemId={required(itemId, 'itemId')}
-      onBack={() => navigate(-1)}
-      onSaved={() => navigate(-1)}
-      onCleared={(item) => {
-        const destination = item.kind === 'movie'
-          ? routes.movies
-          : (item.kind === 'show' || item.kind === 'season' || item.kind === 'episode')
-            ? routes.series
-            : isBookKind(item.kind)
-              ? routes.books
-              : routes.music;
-        navigate(destination, { replace: true });
-      }}
-    />
-  );
-}
-
-export default function App({ platform, apiOverride, playbackOverride }: Props) {
-  const navigate = useNavigate();
-  const location = useLocation();
-  const connectionRequired = !apiOverride;
-
-  const [bootstrapEndpoints, setBootstrapEndpoints] = useState(() => getBootstrapEndpoints());
-  const [connectionNotice, setConnectionNotice] = useState<string>();
-  const [clusterUnreachable, setClusterUnreachable] = useState(false);
-  // With nothing configured, probe this page's own host. The result is never persisted, so every cold start asks again.
-  const sameOrigin = useSameOriginEndpoint(connectionRequired && bootstrapEndpoints.length === 0);
-  // What the client is pointed at. `ConnectionForm` reads `bootstrapEndpoints` instead, so its field stays empty until something is typed.
-  const effectiveEndpoints = useMemo(
-    () => bootstrapEndpoints.length > 0
-      ? bootstrapEndpoints
-      : sameOrigin.endpoint ? [sameOrigin.endpoint] : [],
-    [bootstrapEndpoints, sameOrigin.endpoint],
-  );
-  // Only `'unreachable'` is stored; `'welcome'` is derived from the endpoint list.
-  const [connectionGate, setConnectionGate] = useState<ConnectionGate | undefined>();
-  // While the same-origin probe runs: no gate, no navigation, no session mint.
-  const connectionProbePending = connectionRequired && bootstrapEndpoints.length === 0 && sameOrigin.probing;
-  const effectiveConnectionGate = connectionRequired && !connectionProbePending
-    ? connectionGate ?? initialConnectionGate(connectionRequired, effectiveEndpoints)
-    : undefined;
-  const clientId = useMemo(() => getClientId(), []);
-  const progressStore = useMemo(() => new ContinueWatchingStore(clientId), [clientId]);
-  const queueStore = useMemo(() => new PlaybackQueueStore(clientId), [clientId]);
-  const playlistStore = useMemo(() => new MusicPlaylistStore(clientId), [clientId]);
-  const volumeStore = useMemo(() => new VolumeStore(clientId), [clientId]);
-  const readingPositions = useMemo(() => new ReadingPositionStore(clientId), [clientId]);
-  // Per device, at core's key, so every client keeps the setting alike.
-  const qualityPreferences = useMemo(() => new QualityPreferenceStore(), []);
-  // The setting to offer versions this device cannot play: live for the player, read on demand elsewhere.
-  const offerAll = useSyncExternalStore(qualityPreferences.subscribe, qualityPreferences.getSnapshot).offerAll === true;
-  const offerAllNow = useCallback(() => qualityPreferences.get().offerAll === true, [qualityPreferences]);
-  const endpointKey = effectiveEndpoints.join('\n');
-  const endpointRegistry = useMemo(
-    () => new EndpointRegistry(seedEndpoints({
-      configured: bootstrapEndpoints,
-      // This page's own origin, confirmed as a Macha node. Present only while nothing is configured, so it never outranks a typed endpoint.
-      environment: sameOrigin.endpoint ? [sameOrigin.endpoint] : [],
-      // Endpoints reachable in a previous run. Core seeds them as discovered; seeded as environment,
-      // the first health cycle would wipe the remembered list.
-      remembered: getDiscoveredEndpoints(),
-    }),
-    // Wall-clock, so the health timestamps read as dates on the Status screen.
-    Date.now),
-    [endpointKey],
-  );
-  const endpointCandidates = useEndpointCandidates(endpointRegistry);
-  // The viewer's node choice outlives each player, so it is held on the registry. `prefer()` states a
-  // routing preference; `recordSuccess` would record a round trip that never happened.
-  const pinEndpoint = useCallback(
-    (endpointIds: readonly string[]) => {
-      const endpointId = preferredEndpointForNode(endpointRegistry.candidates(), endpointIds);
-      if (endpointId !== undefined) endpointRegistry.prefer(endpointId);
-      return endpointId;
-    },
-    [endpointRegistry],
-  );
-  // Feeds the bytes Direct Play read-ahead moves into the registry: the only throughput evidence for a node serving media alone.
-  useEffect(() => {
-    setMediaTransferListener(
-      (url, bytes, durationMs) => endpointRegistry.recordTransferByUrl(url, bytes, durationMs),
-    );
-    return () => setMediaTransferListener(undefined);
-  }, [endpointRegistry]);
-  const { auth, ready: sessionReady, roles, mintFailure, signOut: endSession } = useSession({
-    connectionRequired,
-    serverConfigured: effectiveEndpoints.length > 0,
-    endpointRegistry,
-  });
-  const {
-    catalogueApi,
-    manageApi,
-    usersApi,
-    mediaApi: api,
-    playbackResolver,
-    serverApi,
-    clusterStatusApi,
-    acquisitionApi,
-    playbackFactsApi,
-    managementAvailable,
-  } = useMachaServices({ endpointRegistry, auth, apiOverride, playbackOverride });
-  useEndpointHealthMonitor(endpointRegistry, clusterStatusApi, auth, connectionRequired && effectiveEndpoints.length > 0 && !effectiveConnectionGate);
-  // Direct Play's buffered bar reads the file's byte index from the catalogue, which is created after the platform.
-  useEffect(() => {
-    setKeyframeSource((mediaId) => catalogueApi.keyframes(mediaId));
-    return () => setKeyframeSource(undefined);
-  }, [catalogueApi]);
-  // Wait for the session to settle: a whoami sent during the cold-start mint gets a 401 that is not retried, and the roles are never read.
-  const { session, refresh: refreshSession } = useCurrentSession(usersApi, connectionRequired && !effectiveConnectionGate && sessionReady);
-  // Permissions come from the token's roles; the whoami supplies only the display name and password
-  // policy. `sessionPermits` treats unknown roles as permitting everything.
-  const permits = useCallback((role: UserRole) => sessionPermits(roles, role), [roles]);
-  // A session granted nothing, or a mint a node refused. Roles stay `undefined` through a refusal, so
-  // `permits` alone would show the whole navigation; both cases land on the sign-in wall instead.
-  const lockout = lockoutReason(roles, mintFailure?.reason === 'refused');
-  const locked = lockout !== undefined;
-  // The strict test: unknown roles hide Users, since the screen exists only where the server has accounts.
-  const usersAvailable = hasRole(roles, 'manage_users');
-  // The server asks `manager` of every change under /api/v1/manage.
-  const libraryManagementAvailable = managementAvailable && permits('manager');
-  const mediaAvailable = permits('media_viewer');
-  // The Manage pane this account can open. `/manage` wants `manager`, so a `manage_users`-only account goes straight to Users.
-  const manageLanding = libraryManagementAvailable ? routes.manageUnmatched
-    : usersAvailable ? routes.manageUsers
+function Shell(): React.JSX.Element {
+  const { services, continueWatching, sessionReady } = useMacha();
+  // Identity, for display only; the gate below reads roles from the token.
+  const { session, refresh: refreshSession } = useCurrentSession(services.usersApi, sessionReady);
+  // Refused, unreachable or still open, from facts core states; an absent
+  // token is never read as a refusal. Latched, so a failed refresh mid-film
+  // cannot replace the player.
+  const { failure, roles, identity } = useSessionFacts();
+  /** Set when sign-out is committed; cleared by signing in again. */
+  const [signedOut, setSignedOut] = useState(false);
+  const [confirmingSignOut, setConfirmingSignOut] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
+  const [signOutError, setSignOutError] = useState<string>();
+  /**
+   * What ends an admission already held: the viewer signing out, or core
+   * stating the session's identity changed to one with no roles. Anything
+   * else after admission is a transient the latch absorbs. See `access.ts`.
+   */
+  const ended: AdmissionEnded | undefined = signedOut
+    ? 'signed-out'
+    : lapsedIdentity(identity, roles)
+      ? 'identity-changed'
       : undefined;
-  // Where a refused route redirects: Home needs the catalogue, and Settings is the one section no role gates.
-  const landing = mediaAvailable ? routes.home : manageLanding ?? routes.settings;
-  const metadataEditingAvailable = libraryManagementAvailable;
+  const access = useAccessLatched(accessState(sessionReady, failure, roles, ended));
+  const [settingsWhileLocked, setSettingsWhileLocked] = useState(false);
+  /** A stack, so Back unwinds level by level. The last entry is the visible screen. */
+  const [stack, setStack] = useState<Route[]>([{ name: 'home' }]);
+  const route = stack[stack.length - 1] ?? { name: 'home' };
+  const [progress, setProgress] = useState<PlaybackProgress[]>([]);
 
-  const policyOverrides = (platform as { playbackPolicy?: PlaybackPolicyOverrides }).playbackPolicy;
-  // The cap on automatic play: the viewer's Maximum quality, else the platform's screen. Read at each
-  // start. A browser cannot detect mobile data reliably, so the connection is left unknown, which core
-  // reads as Wi-Fi.
-  const deviceCeiling = useCallback(() => qualityCeiling({
-    display: (platform as { displayResolution?: () => DisplayResolution | undefined }).displayResolution?.(),
-    preference: qualityPreferences.get(),
-  }), [platform, qualityPreferences]);
-  // The chooser's inputs: the server's facts for the item, and platform truths no probe can discover.
-  const playbackRuntimeOptions = useMemo(() => ({
-    // The playback facts endpoint, not the catalogue profile: it carries every file the item holds
-    // and the executing node's `operations`, resolved per call.
-    facts: async (media: MediaSummary) => playbackFactsApi.facts({ itemId: media.id }),
-    policyOverrides,
-    qualityCeiling: deviceCeiling,
-    offerAll: offerAllNow,
-  }), [deviceCeiling, offerAllNow, playbackFactsApi, policyOverrides]);
-  const loadFiles = useCallback((item: MediaSummary) => playbackFactsApi.facts({ itemId: item.id }), [playbackFactsApi]);
-  // The qualities a detail page offers beside Play, from the runtime's own inputs, so a button plays what it says.
-  const versionsOf = useCallback(async (item: MediaSummary, files: PlaybackMediaFacts[]): Promise<PlaybackVersions> => playbackVersions(
-    files,
-    await platform.capabilities(),
-    { overrides: policyOverrides, mediaIds: item.mediaIds, ceiling: deviceCeiling(), offerAll: offerAllNow() },
-  ), [deviceCeiling, offerAllNow, platform, policyOverrides]);
-  // Times every session from its request, so the first fragment measures the node's start cost.
-  const measuredResolver = useMemo(() => measureStartCosts(playbackResolver), [playbackResolver]);
-  const { runtime: playbackRuntime, state: playbackRuntimeState } = usePlaybackRuntime(platform, measuredResolver, playbackRuntimeOptions);
-  const preparePlaybackProfile = useCallback((profile: CatalogueMediaProfile) => {
-    playbackRuntime.prepare(technicalProfileFromCatalogue(profile));
-  }, [playbackRuntime]);
-  // Whether playback may be rebuilt from the URL. `sessionReady` is also true while unconfigured, so
-  // endpoints are required too; an injected API has nothing to wait for.
-  const playbackReady = !connectionRequired || (effectiveEndpoints.length > 0 && sessionReady);
-  const playback = usePlaybackController({
-    api,
-    platform,
-    runtime: playbackRuntime,
-    runtimeState: playbackRuntimeState,
-    progressStore,
-    queueStore,
-    volumeStore,
-    ready: playbackReady,
-  });
-  const activePlayback = playback.activePlayback;
+  /**
+   * Focus on each screen beneath the top, by stack depth, so Back restores it.
+   * Only media cards (`mediaFocusId`) are restorable; anything else falls back
+   * to the screen default.
+   */
+  const focusMemory = useRef<(string | undefined)[]>([]);
+  const focusToRestore = useRef<string | undefined>(undefined);
+  /** Set when the top bar chose the next screen, so focus stays on its button (`routeFocus`). */
+  const chosenFromNav = useRef(false);
 
-  const samsungBack = useCallback(() => {
-    if (!buildPlatformTraits.receivesBackKeyEvents) return false;
-    if (effectiveConnectionGate) return true;
-    if (location.pathname === routes.home) {
-      playbackRuntime.terminateForPageExit();
-      platform.exitApplication?.();
-      return true;
-    }
-    const returnTo = playerRouteItemId(location.pathname) ? activePlayback?.returnTo : undefined;
-    void samsungBackTarget(location.pathname, api, returnTo)
-      .then((target) => { if (target) navigate(target); })
-      .catch(() => navigate(routes.home));
+  const push = useCallback(
+    (next: Route) => {
+      // Only a media card: other focus ids are regenerated at each mount.
+      const selected = tvFocus.selected();
+      focusMemory.current[stack.length - 1] = isMediaFocusId(selected) ? selected : undefined;
+      setStack((current) => [...current, next]);
+    },
+    [stack.length],
+  );
+  const pop = useCallback(() => {
+    if (stack.length <= 1) return;
+    focusToRestore.current = focusMemory.current[stack.length - 2];
+    setStack((current) => (current.length > 1 ? current.slice(0, -1) : current));
+  }, [stack.length]);
+  const replaceTop = useCallback((next: Route) => {
+    focusMemory.current = [];
+    focusToRestore.current = undefined;
+    setStack([next]);
+  }, []);
+
+  /**
+   * Put a TV item on its library trail (`libraryTrail`) beneath `top`, with
+   * focus memory rebuilt so each Back lands on the level it came from.
+   * False when the item names no ancestry; the stack is then untouched.
+   */
+  const placeOnTrail = useCallback((top: Route, media: MediaSummary, known?: KnownAncestry): boolean => {
+    const trail = libraryTrail(media, known);
+    if (!trail) return false;
+    focusMemory.current = trail.map((level) => mediaFocusId(level.returnTo));
+    focusToRestore.current = undefined;
+    setStack([...trail.map((level) => level.route as Route), top]);
     return true;
-  }, [activePlayback?.returnTo, api, effectiveConnectionGate, location.pathname, navigate, platform, playbackRuntime]);
+  }, []);
 
-  useTvNavigation(samsungBack);
+  /**
+   * The playback facts endpoint rather than the catalogue profile: it carries
+   * the node's `operations`. Every file is passed, since core's coordinator
+   * chooses among an item's files.
+   */
+  const runtimeOptions = useMemo(
+    () => ({
+      facts: async (media: MediaSummary) => {
+        const files = await services.playbackFactsApi.facts({ itemId: media.id });
+        return files.length > 0 ? files : undefined;
+      },
+      // MPEG-TS, never a whole file: what this set plays. See `TizenPlatform`.
+      policyOverrides: tizenPlatform.playbackPolicy,
+      // Read at each start. Caps automatic play only, not a version the
+      // viewer picks.
+      qualityCeiling: deviceQualityCeiling,
+      // Offer only what this set plays, unless the setting asks for everything.
+      offerAll: () => qualityPreferenceStore().get().offerAll ?? false,
+    }),
+    [services.playbackFactsApi],
+  );
 
-  useEffect(() => {
-    const onServerUnreachable = () => {
-      if (!connectionRequired) return;
-      setConnectionNotice(SERVER_UNREACHABLE_TEXT);
-      setClusterUnreachable(true);
-    };
-    const onServerReachable = () => setClusterUnreachable(false);
-    window.addEventListener(SERVER_UNREACHABLE_EVENT, onServerUnreachable);
-    window.addEventListener(SERVER_REACHABLE_EVENT, onServerReachable);
-    return () => {
-      window.removeEventListener(SERVER_UNREACHABLE_EVENT, onServerUnreachable);
-      window.removeEventListener(SERVER_REACHABLE_EVENT, onServerReachable);
-    };
-  }, [connectionRequired]);
-
-  useEffect(() => {
-    if (!connectionRequired || !shouldEnterConnectionGate(clusterUnreachable, Boolean(activePlayback))) return;
-    setConnectionGate('unreachable');
-    navigate(routes.connection, { replace: true });
-  }, [activePlayback, clusterUnreachable, connectionRequired, navigate]);
-
-  useEffect(() => {
-    if (effectiveConnectionGate && location.pathname !== routes.connection) {
-      navigate(routes.connection, { replace: true });
-    }
-  }, [effectiveConnectionGate, location.pathname, navigate]);
-
-  // The route must match the sign-in wall, or Back walks into a page this session may not see. The
-  // connection route and anything playing are exempt, as in the render guard.
-  useEffect(() => {
-    if (!locked || activePlayback) return;
-    if (location.pathname === routes.login || location.pathname === routes.connection) return;
-    // Carry the intended path, so signing in resumes it.
-    navigate(routes.login, { replace: true, state: { from: `${location.pathname}${location.search}` } });
-  }, [activePlayback, locked, location.pathname, location.search, navigate]);
-
-  const [signOutNotice, setSignOutNotice] = useState<string>();
-  // Order matters: playback first, as its session cannot be closed once the token is gone and would
-  // hold a transcode slot; then the session. A failed revoke still signs this device out, with a notice.
-  const signOut = useCallback(async () => {
-    setSignOutNotice(undefined);
-    await playback.stop();
-    try {
-      await endSession();
-    } catch {
-      setSignOutNotice(SIGN_OUT_UNCONFIRMED_TEXT);
-    }
-    refreshSession();
-    navigate(routes.home, { replace: true });
-  }, [endSession, navigate, playback.stop, refreshSession]);
-
-  const finishSignIn = useCallback(() => {
-    setSignOutNotice(undefined);
-    refreshSession();
-    navigate(postSignInDestination((location.state as { from?: unknown } | null)?.from, landing), { replace: true });
-  }, [landing, location.state, navigate, refreshSession]);
-
-  const open = useCallback((item: MediaSummary) => navigate(pathForMedia(item)), [navigate]);
-  const openPlayer = useCallback((item: MediaSummary) => playback.startPlayback(item), [playback.startPlayback]);
-  const openPlayerFromStart = useCallback((item: MediaSummary) => playback.startPlayback(item, { fromStart: true }), [playback.startPlayback]);
-  const openPlayerVersion = useCallback((item: MediaSummary, version: VersionStep) => playback.startPlayback(item, { version }), [playback.startPlayback]);
-
-  const music = useMusicController({
-    api,
-    playlistStore,
-    queueStore,
-    activePlayback: Boolean(activePlayback),
-    startPlayback: playback.startPlayback,
-    onQueueChange: playback.setQueueState,
-  });
-
-  // Saves without probing: a probe needs a session, which a fresh install lacks. A bad address
-  // surfaces through the same unreachable path as a node that fails later.
-  const saveServer = useCallback(async (urls: readonly string[]): Promise<string | undefined> => {
-    const normalizedEndpoints = normalizeConnectionEndpoints(urls);
-    if (normalizedEndpoints.length === 0) {
-      const message = 'Enter at least one Macha API endpoint.';
-      setConnectionNotice(message);
-      return message;
-    }
-    setConnectionNotice(undefined);
-    // Close the old session before the new server takes over: a lease cannot move between servers.
-    await playbackRuntime.stop();
-    persistBootstrapEndpoints(normalizedEndpoints);
-    reportClusterReachable();
-    setClusterUnreachable(false);
-    setBootstrapEndpoints(normalizedEndpoints);
-    setConnectionGate(undefined);
-    navigate(routes.home, { replace: true });
-    return undefined;
-  }, [navigate, playbackRuntime]);
-
-  const openMetadataEditor = useCallback((id: string) => {
-    navigate(routes.edit(id));
-  }, [navigate]);
-  const detailRouteProps = {
-    api,
-    onPlay: openPlayer,
-    onPlayFromStart: openPlayerFromStart,
-    loadFiles,
-    versionsOf,
-    onPlayVersion: openPlayerVersion,
-    progressById: playback.progressById,
-    onEdit: metadataEditingAvailable ? openMetadataEditor : undefined,
-    onMediaProfile: preparePlaybackProfile,
+  /**
+   * The playback a standby closed: the player stays open, and the return
+   * brings the title back where it stopped, paused, with the chrome up on
+   * Play. The handlers read `route` and the stores through this render.
+   */
+  const [returnedFromExit, setReturnedFromExit] = useState(0);
+  const pageExitHandlers: PageExitHandlers = {
+    onExit: () => recordPlayingProgress(),
+    onReturn: (request) => {
+      if (route.name !== 'player' || route.media.id !== request.media.id) return;
+      startPlayback(request.media, continueWatching.positionFor(request.media.id), undefined, true);
+      setReturnedFromExit((count) => count + 1);
+    },
   };
 
-  const settingsPane = <SettingsScreen api={api} serverApi={serverApi} bootstrapEndpoints={bootstrapEndpoints} usingHost={sameOrigin.endpoint} connectionNotice={connectionNotice} onSave={saveServer} qualityPreferences={qualityPreferences} qualityCeiling={deviceCeiling} />;
-  const usersPane = <UsersScreen api={usersApi} session={session} />;
-  // Hiding a nav link is not access control: every catalogue route is guarded here too.
-  const mediaPane = (element: ReactElement) => mediaAvailable ? element : <Navigate to={landing} replace />;
-  const managePane = (section: ManageSection) => (
-    <ManageScreen
-      api={manageApi}
-      section={section}
-      users={usersPane}
-    />
+  const { runtime } = usePlaybackRuntime(tizenPlatform, services.playbackResolver, runtimeOptions, pageExitHandlers);
+
+  /**
+   * The one call into `runtime.play`. A version the viewer picked is never
+   * capped or overridden; without one, core decides.
+   */
+  const startPlayback = useCallback(
+    (media: MediaSummary, startPositionMs: number, version?: VersionStep, paused = false) => {
+      void runtime.play(
+        { media, startPositionMs, returnTo: 'detail', paused },
+        startPreferences(startPositionMs, continueWatching.entryFor(media.id), version),
+      );
+    },
+    [runtime, continueWatching],
   );
 
-  // The operator's name for each node, as core learns it from status.
-  const nodeNameOf = useCallback((endpointId: string) => endpointRegistry.nodeName(endpointId), [endpointRegistry]);
-  const miniPlayerActive = Boolean(playback.playerVisible && !playback.playerRouteActive);
-  const playerHost = playback.playerVisible && activePlayback ? <PlayerHost
-    endpoints={endpointCandidates}
-    nodeNameOf={nodeNameOf}
-    onPinEndpoint={pinEndpoint}
-    api={api}
-    request={activePlayback}
-    platform={platform}
-    runtime={playbackRuntime}
-    presentation={playback.playerRouteActive ? 'full' : 'mini'}
-    onProgress={playback.updateProgress}
-    onPosition={playback.persistPlaybackPosition}
-    onMinimize={playback.minimize}
-    onExpand={playback.expand}
-    onStop={playback.stop}
-    onPrevious={playback.previous}
-    onNext={playback.next}
-    onEnded={playback.handleEnded}
-    canPrevious={playback.canPrevious}
-    canNext={playback.canNext}
-    queuePosition={playback.queueState ? { index: playback.queueState.currentIndex, total: playback.queueState.items.length } : undefined}
-    volume={playback.volume}
-    onVolumeChange={playback.changeVolume}
-    offerAll={offerAll}
-  /> : null;
+  /**
+   * Writes the resume point during playback: `closePlayer` covers only a
+   * deliberate exit, and a television can be switched off at any moment.
+   */
+  useContinueWatchingWriter(
+    runtime,
+    continueWatching,
+    route.name === 'player' ? route.media : undefined,
+  );
 
-  // Hold the splash while this page's own host is probed, rather than flashing the form.
-  if (connectionProbePending) return <div className={`app-shell${miniPlayerActive ? ' has-mini-player' : ''}`}>
-    <Loading />
-    {playerHost}
-  </div>;
+  useEffect(() => {
+    if (route.name === 'home') setProgress(continueWatching.list());
+  }, [continueWatching, route.name]);
 
-  if (effectiveConnectionGate) return <div className={`app-shell${miniPlayerActive ? ' has-mini-player' : ''}`}>
-    <ConnectionGateScreen
-      welcome={effectiveConnectionGate === 'welcome'}
-      notice={connectionNotice}
-      bootstrapEndpoints={bootstrapEndpoints}
-      usingHost={sameOrigin.endpoint}
-      onSave={saveServer}
+  const recordPlayingProgress = useCallback(() => {
+    const media = route.name === 'player' ? route.media : undefined;
+    const progress = attributableProgress(runtime.getPlaybackSnapshot(), media);
+    if (progress) continueWatching.update(progress);
+  }, [runtime, route, continueWatching]);
+
+  /**
+   * Leaving the player writes the resume point, then stops the session: one
+   * left open holds the node's single transcode slot (429 for the next viewer).
+   */
+  const closePlayer = useCallback(() => {
+    recordPlayingProgress();
+    void runtime.stop();
+    pop();
+  }, [runtime, recordPlayingProgress, pop]);
+
+  /**
+   * Playback is stopped, and awaited, before the token changes: afterwards
+   * the session cannot be closed and holds the node's transcode slot until
+   * `session_idle`. Core clears local state before revoking, so a throw means
+   * the session may still be live on a node; that is shown, not swallowed.
+   */
+  const signOut = useCallback(async () => {
+    setSignOutError(undefined);
+    setSigningOut(true);
+    try {
+      await runtime.stop();
+      await sessionManager.signOut();
+    } catch {
+      setSignOutError(SIGN_OUT_REVOKE_FAILED);
+    } finally {
+      setSigningOut(false);
+      // Local state is cleared whether or not the revoke succeeded. The stack
+      // goes home so the next sign-in does not resume deep in the library.
+      setSignedOut(true);
+      setConfirmingSignOut(false);
+      setStack([{ name: 'home' }]);
+    }
+  }, [runtime]);
+
+  const onBack = useCallback((): boolean => {
+    if (confirmingSignOut) {
+      if (!signingOut) setConfirmingSignOut(false);
+      return true;
+    }
+    if (route.name === 'player') {
+      closePlayer();
+      return true;
+    }
+    // Only Home exits, and only after storage is flushed (`backAction`,
+    // `exitAfterFlush`); the press is always consumed.
+    const action = backAction(route.name, stack.length);
+    if (action === 'exit') void exitAfterFlush(flushStorage, () => tizenPlatform.exitApplication(), EXIT_FLUSH_BUDGET_MS);
+    else if (action === 'home') setStack([{ name: 'home' }]);
+    else pop();
+    return true;
+  }, [route.name, stack.length, closePlayer, pop, confirmingSignOut, signingOut]);
+
+  useTvNavigation({
+    onBack,
+    onPlayPause: (intent) => {
+      if (route.name !== 'player') return;
+      const paused = runtime.getPlaybackSnapshot()?.intent.paused ?? false;
+      runtime.setPaused(intent === undefined ? !paused : intent === 'pause');
+    },
+    onRewind: () => route.name === 'player' && runtime.seekBy(-10_000),
+    onFastForward: () => route.name === 'player' && runtime.seekBy(10_000),
+    onStop: () => route.name === 'player' && closePlayer(),
+    // Same as the player's episode buttons. `episodeNav` and `switchEpisode`
+    // are declared below; these run later, on a key.
+    onNext: () => {
+      if (route.name === 'player' && episodeNav.next) switchEpisode(episodeNav.next);
+    },
+    onPrevious: () => {
+      if (route.name === 'player' && episodeNav.previous) switchEpisode(episodeNav.previous);
+    },
+  });
+
+  // Re-seed focus when the screen changes; on the way back, restore the place
+  // the viewer left. A remembered id that no longer registers falls through
+  // to the default (`TvFocusRegistry.current()`).
+  useEffect(() => {
+    const remembered = focusToRestore.current;
+    focusToRestore.current = undefined;
+    const fromNav = chosenFromNav.current;
+    chosenFromNav.current = false;
+    const action = routeFocus({ fromNav, remembered });
+    if (action === 'keep') {
+      // Re-selecting makes the selection the viewer's choice, so the new
+      // screen's default card cannot take it.
+      tvFocus.select(tvFocus.selected());
+      return;
+    }
+    if (action === 'default') {
+      tvFocus.focusDefault();
+      return;
+    }
+
+    // The returned-to screen re-fetches, so its cards are usually not yet
+    // registered: seed the default now, and let the card claim focus when it
+    // registers. A key press abandons the restore.
+    tvFocus.focusDefault();
+    tvFocus.restoreWhenPresent(remembered);
+  }, [route.name]);
+
+  const open = useCallback(
+    (media: MediaSummary) => {
+      const next = routeForMedia(media);
+      if (!placeOnTrail(next, media)) push(next);
+    },
+    [push, placeOnTrail],
+  );
+
+  /**
+   * Puts the item's own detail screen (`routeForMedia`) beneath the player
+   * unless the viewer is already on it, so Back from playback lands there.
+   */
+  const play = useCallback(
+    (media: MediaSummary, startPositionMs: number, known?: KnownAncestry, version?: VersionStep) => {
+      // The one path every Play control shares: an unavailable title never starts.
+      if (!availableToPlay(media)) {
+        playbackLog.info('play-refused-unavailable', { mediaId: media.id });
+        return;
+      }
+      const start = () => startPlayback(media, startPositionMs, version);
+      // An episode goes on its library trail, so Back arrives at its season.
+      if (placeOnTrail({ name: 'player', media }, media, known)) {
+        start();
+        return;
+      }
+      setStack((current) => {
+        const beneath = current[current.length - 1];
+        const detail = routeForMedia(media);
+        const alreadyBeneath =
+          beneath !== undefined &&
+          beneath.name === detail.name &&
+          'media' in beneath &&
+          beneath.media.id === media.id;
+        return alreadyBeneath
+          ? [...current, { name: 'player', media }]
+          : [...current, detail, { name: 'player', media }];
+      });
+      start();
+    },
+    [startPlayback, placeOnTrail],
+  );
+
+  const playingMedia = route.name === 'player' ? route.media : undefined;
+  const episodeNav = useEpisodeNeighbours(services.mediaApi, playingMedia);
+
+  /**
+   * Previous / next from inside the player. Writes the place being left, then
+   * plays the neighbour from its own resume point. The player screen stays
+   * mounted: remounting would detach the surface mid-handover.
+   */
+  const switchEpisode = useCallback(
+    (episode: Episode) => {
+      recordPlayingProgress();
+      play(episode, continueWatching.positionFor(episode.id));
+    },
+    [recordPlayingProgress, play, continueWatching],
+  );
+
+  /**
+   * When an episode ends, play the next (`episodeToPlayOnEnd`), once per
+   * ending: the latch clears when playback is no longer ended.
+   */
+  const [playbackEnded, setPlaybackEnded] = useState(false);
+  useEffect(
+    () => runtime.subscribePlayback((snapshot) => setPlaybackEnded(Boolean(snapshot?.event.ended))),
+    [runtime],
+  );
+  const advancedFrom = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!playbackEnded) {
+      advancedFrom.current = undefined;
+      return;
+    }
+    const next = episodeToPlayOnEnd(playingMedia, playbackEnded, episodeNav);
+    if (!next || !playingMedia || advancedFrom.current === playingMedia.id) return;
+    advancedFrom.current = playingMedia.id;
+    switchEpisode(next);
+  }, [playbackEnded, playingMedia, episodeNav, switchEpisode]);
+
+  // An episode resumed without `playbackContext` goes on its trail once core
+  // has looked its ancestry up.
+  useEffect(() => {
+    if (!playingMedia || playingMedia.kind !== 'episode' || playingMedia.playbackContext) return;
+    if (!episodeNav.show || !episodeNav.season) return;
+    if (stack[stack.length - 2]?.name === 'season') return;
+    placeOnTrail({ name: 'player', media: playingMedia }, playingMedia, {
+      show: episodeNav.show,
+      season: episodeNav.season,
+    });
+  }, [playingMedia, episodeNav.show, episodeNav.season, stack, placeOnTrail]);
+
+  if (route.name === 'player') {
+    return (
+      <PlayerScreen
+        media={route.media}
+        runtime={runtime}
+        onClose={closePlayer}
+        episodeNav={episodeNav}
+        onPlayEpisode={switchEpisode}
+        returnedFromExit={returnedFromExit}
+      />
+    );
+  }
+
+  const body = !sessionReady ? (
+    <Loading label="Connecting…" />
+  ) : route.name === 'home' ? (
+    <HomeScreen
+      api={services.mediaApi}
+      catalogue={services.catalogueApi}
+      continueWatching={progress}
+      onOpen={open}
+      onResume={(media) => play(media, continueWatching.positionFor(media.id))}
+      // The list `clear` returns is the rail's new state.
+      onRemoveFromContinueWatching={(media) => setProgress(continueWatching.clear(media.id))}
     />
-    {playerHost}
-  </div>;
+  ) : route.name === 'movies' ? (
+    // Keyed by kind, or React keeps one instance mounted across both lists and
+    // a sort chosen on Movies carries over to TV Shows.
+    <LibraryScreen key="movies" api={services.mediaApi} kind="movies" onOpen={open} />
+  ) : route.name === 'shows' ? (
+    <LibraryScreen key="shows" api={services.mediaApi} kind="shows" onOpen={open} />
+  ) : route.name === 'music' ? (
+    <MusicScreen api={services.mediaApi} onOpen={open} />
+  ) : route.name === 'search' ? (
+    <SearchScreen api={services.mediaApi} onOpen={open} />
+  ) : route.name === 'status' ? (
+    <StatusScreen api={services.clusterStatusApi} />
+  ) : route.name === 'settings' ? (
+    <SettingsScreen />
+  ) : route.name === 'detail' ? (
+    <DetailScreen
+      media={route.media}
+      resumePositionMs={continueWatching.positionFor(route.media.id)}
+      onPlay={(positionMs, version) => play(route.media, positionMs, undefined, version)}
+      onBack={pop}
+    />
+  ) : route.name === 'series' ? (
+    <SeriesScreen api={services.mediaApi} show={route.media} onOpenSeason={open} />
+  ) : route.name === 'season' ? (
+    <SeasonScreen
+      api={services.mediaApi}
+      season={route.media}
+      onPlayEpisode={(episode) => play(episode, continueWatching.positionFor(episode.id))}
+      progressFor={(mediaId) => {
+        const entry = progress.find((item) => item.itemId === mediaId);
+        return entry && entry.durationMs > 0 ? entry.positionMs / entry.durationMs : undefined;
+      }}
+    />
+  ) : null;
 
-  // Hold the splash until the cold-start mint settles; `SessionManager.fetch()` already holds early
-  // requests. Never mid-playback: a slow re-auth must not interrupt it.
-  if (connectionRequired && !sessionReady && !activePlayback) return <div className={`app-shell${miniPlayerActive ? ' has-mini-player' : ''}`}>
-    <Loading />
-    {playerHost}
-  </div>;
+  /**
+   * Nothing answered: not an access problem, so no sign-in is offered.
+   * Settings stays reachable, since pointing the set at another cluster is
+   * the only action that can help.
+   */
+  if (access.kind === 'offline') {
+    return (
+      <View style={styles.shell}>
+        {settingsWhileLocked ? (
+          <LockedSettings onBack={() => setSettingsWhileLocked(false)} />
+        ) : (
+          <OfflineScreen onOpenSettings={() => setSettingsWhileLocked(true)} />
+        )}
+      </View>
+    );
+  }
 
-  // A session granted nothing gets the login alone. Never while playing: failover re-reads the
-  // session, and the server stops the stream itself when a role is revoked. `routes.connection`
-  // stays reachable so the viewer can point the client at another cluster.
-  if (locked && !activePlayback) return <div className="app-shell">
-    {location.pathname === routes.connection
-      ? <ConnectionGateScreen
-          welcome={false}
-          notice={connectionNotice}
-          bootstrapEndpoints={bootstrapEndpoints}
-          usingHost={sameOrigin.endpoint}
-          onSave={saveServer}
-        />
-      : <LoginScreen
-          guestAllowed={false}
-          connectionReachable
-          notice={signOutNotice ?? lockoutNotice(lockout)}
-          onSignIn={(username, password) => sessionManager.signIn({ username, password })}
-          onSignedIn={finishSignIn}
-        />}
-  </div>;
-
-  const musicSectionActive = location.pathname === routes.music || location.pathname.startsWith(`${routes.music}/`);
-  const booksSectionActive = location.pathname === routes.books || location.pathname.startsWith(`${routes.books}/`);
-  const statusSectionActive = location.pathname === routes.status || location.pathname.startsWith(`${routes.status}/`);
-  const manageSectionActive = location.pathname === routes.manage || location.pathname.startsWith(`${routes.manage}/`);
-  const importSectionActive = location.pathname === routes.ingest || location.pathname.startsWith(`${routes.ingest}/`);
+  /**
+   * A session granted no roles may not use the client; the wall replaces the
+   * shell. Settings stays reachable, or a set whose node stops granting roles
+   * could not be pointed at another cluster.
+   */
+  if (access.kind === 'sign-in') {
+    return (
+      <View style={styles.shell}>
+        {settingsWhileLocked ? (
+          <LockedSettings onBack={() => setSettingsWhileLocked(false)} />
+        ) : (
+          <LoginScreen
+            guestAllowed={false}
+            /*
+             * Said only for the case core reports. A 401 does not separate an
+             * expiry from a revoke from a role change, so nothing else is said.
+             */
+            notice={
+              access.kind === 'sign-in' && access.because === 'identity-changed'
+                ? 'This session stopped belonging to your account. Sign in again to carry on watching.'
+                : undefined
+            }
+            onSignIn={(username, password) => sessionManager.signIn({ username, password })}
+            onSignedIn={() => {
+              // Clears the wall; otherwise signing straight back in stays held
+              // at the login screen.
+              setSignedOut(false);
+              refreshSession();
+            }}
+            onOpenSettings={() => setSettingsWhileLocked(true)}
+          />
+        )}
+      </View>
+    );
+  }
 
   return (
-    <div className={`app-shell${miniPlayerActive ? ' has-mini-player' : ''}`}>
-      {!playback.playerRouteActive && <img className="app-watermark" src={logoUrl} alt="" aria-hidden="true" />}
-      <header className="topbar">
-        <NavLink to={routes.home} className="brand-link" aria-label="Macha home">
-          <AppLogo />
-          <span className="brand-name">Macha</span>
-        </NavLink>
-        <nav aria-label="Main navigation">
-          {navItems.map((item) => {
-            if (item.to === routes.manage && !libraryManagementAvailable && !usersAvailable) return null;
-            if (item.needs && !permits(item.needs)) return null;
-            // Importing needs a keyboard and a file browser, which a remote cannot offer, and the TV has no reader.
-            if ((item.to === routes.ingest || item.to === routes.books) && isTvBuild) return null;
-            return (
-              <NavLink
-                key={item.to}
-                to={item.to === routes.manage ? manageLanding ?? item.to : item.to}
-                end={item.end}
-                data-tv-focusable="true"
-                className={({ isActive }: { isActive: boolean }) => isActive ? 'active' : undefined}
-              >
-                {item.label}
-              </NavLink>
-            );
-          })}
-        </nav>
-        <div className="topbar-trailing">
-          {session && <AccountMenu session={session} onSignOut={signOut} />}
-          <NavLink
-            to={routes.settings}
-            className={({ isActive }: { isActive: boolean }) => `topbar-settings${isActive ? ' active' : ''}`}
-            data-tv-focusable="true"
-            aria-label="Settings"
-            title="Settings"
-          >
-            <SettingsIcon />
-          </NavLink>
-        </div>
-      </header>
-      {signOutNotice && (
-        <p className="app-notice" role="alert">
-          {signOutNotice}
-          <button className="secondary-button" type="button" onClick={() => setSignOutNotice(undefined)} data-tv-focusable="true">Dismiss</button>
-        </p>
-      )}
-      {music.playlistNotice && (
-        <p className="app-notice" role="alert">
-          {music.playlistNotice}
-          <button className="secondary-button" type="button" onClick={music.dismissPlaylistNotice} data-tv-focusable="true">Dismiss</button>
-        </p>
-      )}
-      {!playback.playerRouteActive && (musicSectionActive || booksSectionActive || statusSectionActive || manageSectionActive || importSectionActive) && (
-        <div className="section-nav-slot">
-          {musicSectionActive ? <MusicNav />
-            : booksSectionActive ? <BooksNav />
-              : statusSectionActive ? <StatusNav />
-                : importSectionActive ? <ImportNav />
-                  : <ManageNav managementAvailable={libraryManagementAvailable} usersAvailable={usersAvailable} />}
-        </div>
-      )}
-      <main>
-        <Routes>
-          <Route path={routes.home} element={mediaPane(<HomeScreen api={api} catalogue={catalogueApi} continueWatching={playback.continueWatching} onOpen={open} onResume={openPlayer} onRemoveFromContinueWatching={playback.removeFromContinueWatching} />)} />
-          <Route path={routes.movies} element={mediaPane(<LibraryScreen api={api} kind="movies" onOpen={open} />)} />
-          <Route path="/movies/:movieId" element={mediaPane(<DetailRoute {...detailRouteProps} parameter="movieId" />)} />
-          <Route path={routes.series} element={mediaPane(<LibraryScreen api={api} kind="shows" onOpen={open} />)} />
-          <Route path="/series/:seriesId" element={mediaPane(<SeriesRoute api={api} onOpenSeason={open} onEdit={metadataEditingAvailable ? openMetadataEditor : undefined} />)} />
-          <Route path="/series/:seriesId/seasons/:seasonId" element={mediaPane(<SeasonRoute api={api} progress={playback.progressById} onEdit={metadataEditingAvailable ? openMetadataEditor : undefined} />)} />
-          <Route path="/episodes/:episodeId" element={mediaPane(<DetailRoute {...detailRouteProps} parameter="episodeId" />)} />
-          <Route path={routes.music} element={mediaPane(<Navigate to={routes.musicArtists} replace />)} />
-          <Route path={routes.musicArtists} element={mediaPane(<MusicScreen api={api} section="artists" onOpen={open} onPlayNow={music.playNow} onAddToPlaylist={music.addToPlaylist} onPlayNext={music.playNext} onPlayLater={music.playLater} onShuffle={music.shuffle} />)} />
-          <Route path={routes.musicAlbums} element={mediaPane(<MusicScreen api={api} section="albums" onOpen={open} onPlayNow={music.playNow} onAddToPlaylist={music.addToPlaylist} onPlayNext={music.playNext} onPlayLater={music.playLater} onShuffle={music.shuffle} />)} />
-          <Route path={routes.musicTracks} element={mediaPane(<MusicScreen api={api} section="tracks" onOpen={open} onPlayNow={music.playNow} onAddToPlaylist={music.addToPlaylist} onPlayNext={music.playNext} onPlayLater={music.playLater} onShuffle={music.shuffle} />)} />
-          <Route path={routes.musicPlaylist} element={mediaPane(<MusicPlaylistScreen api={api} catalogue={catalogueApi} entries={music.playlistEntries} onPlay={(index) => music.playPlaylist(false, index)} onShuffle={() => music.playPlaylist(true)} onRemove={music.removePlaylistEntry} onMove={music.movePlaylistEntry} onClear={music.clearPlaylist} />)} />
-          <Route path="/music/artists/:artistId" element={mediaPane(<ArtistRoute api={api} onOpenAlbum={open} onAddToPlaylist={music.addToPlaylist} onPlayNext={music.playNext} onPlayLater={music.playLater} onShuffle={music.shuffle} onEdit={metadataEditingAvailable ? openMetadataEditor : undefined} />)} />
-          <Route path="/music/albums/:albumId" element={mediaPane(<AlbumRoute api={api} onPlay={playback.openAlbumTrack} onPlayAll={music.playAlbumAll} onOpenTrack={open} onAddToPlaylist={music.addToPlaylist} onPlayNext={music.playNext} onPlayLater={music.playLater} onShuffle={music.shuffle} onEdit={metadataEditingAvailable ? openMetadataEditor : undefined} />)} />
-          <Route path="/music/tracks/:trackId" element={mediaPane(<DetailRoute {...detailRouteProps} parameter="trackId" />)} />
-          <Route path={routes.books} element={mediaPane(<Navigate to={routes.bookTitles} replace />)} />
-          <Route path={routes.bookTitles} element={mediaPane(<BooksScreen api={api} section="titles" onOpen={open} />)} />
-          <Route path={routes.bookAuthors} element={mediaPane(<BooksScreen api={api} section="authors" onOpen={open} />)} />
-          <Route path={routes.bookSeriesList} element={mediaPane(<BooksScreen api={api} section="series" onOpen={open} />)} />
-          <Route path={`${routes.bookTitles}/:bookId`} element={mediaPane(<BookRoute api={api} catalogue={catalogueApi} positions={readingPositions} onEdit={metadataEditingAvailable ? openMetadataEditor : undefined} />)} />
-          <Route path={`${routes.bookAuthors}/:collectionId`} element={mediaPane(<BookCollectionRoute api={api} kind="author" onOpenBook={open} onEdit={metadataEditingAvailable ? openMetadataEditor : undefined} />)} />
-          <Route path={`${routes.bookSeriesList}/:collectionId`} element={mediaPane(<BookCollectionRoute api={api} kind="series" onOpenBook={open} onEdit={metadataEditingAvailable ? openMetadataEditor : undefined} />)} />
-          <Route path="/read/:bookId" element={mediaPane(<ReaderRoute api={api} catalogue={catalogueApi} positions={readingPositions} />)} />
-          <Route path="/play/:itemId" element={<div className="player-route-placeholder" aria-hidden="true" />} />
-          <Route path="/items/:itemId" element={mediaPane(<DetailRoute {...detailRouteProps} parameter="itemId" />)} />
-          <Route path="/items/:itemId/edit" element={metadataEditingAvailable ? <MetadataEditorRoute api={catalogueApi} facts={playbackFactsApi} manage={libraryManagementAvailable ? manageApi : undefined} /> : <Navigate to={landing} replace />} />
-          <Route path={routes.search} element={mediaPane(<SearchScreen api={api} onOpen={open} books={!isTvBuild} />)} />
-          <Route path={routes.ingest} element={<Navigate to={routes.ingestTorrents} replace />} />
-          <Route path={routes.ingestTorrents} element={permits('importer') ? <IngestScreen api={acquisitionApi} section="torrents" /> : <Navigate to={landing} replace />} />
-          <Route path={routes.ingestFiles} element={permits('importer') ? <IngestScreen api={acquisitionApi} section="files" statusApi={clusterStatusApi} /> : <Navigate to={landing} replace />} />
-          <Route path={`${routes.ingestFiles}/:jobId`} element={permits('importer') ? <IngestJobDetailScreen api={acquisitionApi} statusApi={clusterStatusApi} /> : <Navigate to={landing} replace />} />
-          <Route path={`${routes.ingestTorrents}/:torrentId`} element={permits('importer') ? <TorrentDetailScreen api={acquisitionApi} /> : <Navigate to={landing} replace />} />
-          <Route path={routes.status} element={permits('view_status') ? <StatusScreen api={clusterStatusApi} endpointRegistry={endpointRegistry} platform={platform} manageApi={libraryManagementAvailable ? manageApi : undefined} section="overview" auth={auth} /> : <Navigate to={landing} replace />} />
-          <Route path={routes.statusClient} element={permits('view_status') ? <StatusScreen api={clusterStatusApi} endpointRegistry={endpointRegistry} platform={platform} manageApi={libraryManagementAvailable ? manageApi : undefined} section="client" auth={auth} /> : <Navigate to={landing} replace />} />
-          <Route path={routes.statusConnectivity} element={permits('view_status') ? <StatusScreen api={clusterStatusApi} endpointRegistry={endpointRegistry} platform={platform} manageApi={libraryManagementAvailable ? manageApi : undefined} section="connectivity" auth={auth} /> : <Navigate to={landing} replace />} />
-          <Route path="/status/nodes/:nodeId" element={permits('view_status') ? <NodeStatusScreen api={clusterStatusApi} /> : <Navigate to={landing} replace />} />
-          <Route path={routes.manage} element={<Navigate to={libraryManagementAvailable ? routes.manageUnmatched : usersAvailable ? routes.manageUsers : routes.settings} replace />} />
-          <Route path={routes.manageUnmatched} element={libraryManagementAvailable ? managePane('unmatched') : <Navigate to={routes.settings} replace />} />
-          <Route path={`${routes.manageUnmatched}/:fileId`} element={libraryManagementAvailable ? <UnmatchedFilePage api={manageApi} catalogueApi={catalogueApi} /> : <Navigate to={routes.settings} replace />} />
-          <Route path={routes.manageFiles} element={libraryManagementAvailable ? managePane('files') : <Navigate to={routes.settings} replace />} />
-          <Route path={routes.manageUsers} element={usersAvailable ? managePane('users') : <Navigate to={routes.settings} replace />} />
-          <Route path={routes.settings} element={settingsPane} />
-          <Route path={routes.connection} element={settingsPane} />
-          {/* Settings paths under Manage redirect rather than fall to the catch-all. */}
-          <Route path="/manage/settings" element={<Navigate to={routes.settings} replace />} />
-          <Route path="/manage/settings/connection" element={<Navigate to={routes.connection} replace />} />
-          <Route path={routes.login} element={<LoginScreen onSignIn={(username, password) => sessionManager.signIn({ username, password })} onSignedIn={finishSignIn} />} />
-          <Route path={routes.account} element={<AccountScreen api={usersApi} session={session} />} />
-          <Route path={routes.accountPassword} element={<ChangePasswordScreen api={usersApi} policy={session?.password_policy} onChanged={refreshSession} />} />
-          <Route path={routes.sponsor} element={<SponsorScreen />} />
-          <Route path="*" element={<Navigate to={landing} replace />} />
-        </Routes>
-      </main>
-
-      {playerHost}
-    </div>
+    <View style={styles.shell}>
+      <Image source={machaIconUrl} style={styles.watermark} resizeMode="contain" />
+      <TopBar
+        items={NAV}
+        // The section the stack is rooted in, not only the screen on top.
+        active={TOP_LEVEL.has(route.name) ? route.name : TOP_LEVEL.has(stack[0]?.name ?? '') ? stack[0]!.name : 'home'}
+        onSelect={(key) => {
+          // Only when the screen changes: otherwise no effect spends the flag
+          // and it would hold focus on the bar at the next change.
+          if (key !== route.name) chosenFromNav.current = true;
+          replaceTop({ name: key } as Route);
+        }}
+        username={session?.username}
+        // Only for a named account; an unnamed session has nothing to leave.
+        onSignOut={session?.username ? () => setConfirmingSignOut(true) : undefined}
+        settingsActive={route.name === 'settings'}
+        onOpenSettings={() => replaceTop({ name: 'settings' })}
+      />
+      <View style={styles.main}>{body}</View>
+      {confirmingSignOut ? (
+        <ConfirmDialog
+          title="Sign out?"
+          /*
+           * Sign-out revokes this token only; other devices stay signed in,
+           * and the wording must not claim otherwise.
+           */
+          body={`This signs ${session?.username ?? 'you'} out on this television only; anywhere else stays signed in. Anything playing here will stop.`}
+          confirmLabel="Sign out"
+          destructive
+          busy={signingOut}
+          error={signOutError}
+          onConfirm={() => void signOut()}
+          onCancel={() => setConfirmingSignOut(false)}
+        />
+      ) : null}
+    </View>
   );
 }
+
+/**
+ * Settings from behind the login wall. There is no navigation stack here, so
+ * Back is handled locally.
+ */
+function LockedSettings({ onBack }: { onBack: () => void }): React.JSX.Element {
+  useEffect(() => {
+    const subscription = backHandler.addListener(() => {
+      onBack();
+      return true;
+    });
+    return () => subscription.remove();
+  }, [onBack]);
+
+  return <SettingsScreen />;
+}
+
+export function App(): React.JSX.Element {
+  const [ready, setReady] = useState(false);
+
+  // Order: hydrate storage, then configure the host, then construct services.
+  // Nothing renders until the read completes.
+  useEffect(() => {
+    void hydrateStorage().then(() => {
+      // The buffer configured itself at import, before the setting was readable.
+      syncDiagnosticsLevel();
+
+      // Snapshot what a previous run left open before this one records
+      // anything. The reconcile belongs in core (`state/liveSessions.ts`);
+      // meanwhile this puts an abandoned session on the trail.
+      const orphaned = orphanedSessions();
+      if (orphaned.length > 0) {
+        playbackLog.warn('sessions-orphaned-by-previous-run', { count: orphaned.length });
+      }
+
+      setReady(true);
+    });
+  }, []);
+
+  if (!ready) {
+    return (
+      <View style={styles.splash}>
+        <Image source={machaIconUrl} style={styles.splashLogo} resizeMode="contain" />
+      </View>
+    );
+  }
+
+  return (
+    <MachaProvider>
+      <Shell />
+    </MachaProvider>
+  );
+}
+
+const WATERMARK = Math.min(Math.max(220, screenSize.width * 0.28), 430);
+const SPLASH_LOGO = Math.min(screenSize.width * 0.34, 320);
+
+const styles = {
+  // `body { background: radial-gradient(circle at 50% -20%, #27272c 0, #0e0e0f 45%) }`
+  // flattened to its dominant stop, as on the Android client.
+  shell: {
+    flex: 1,
+    backgroundColor: colour.background,
+  },
+  main: {
+    flex: 1,
+  },
+  // `.app-watermark { width: clamp(220px,28vw,430px); opacity: .035 }`
+  watermark: {
+    position: 'absolute',
+    left: '50%',
+    top: '53%',
+    width: WATERMARK,
+    height: WATERMARK,
+    marginLeft: -WATERMARK / 2,
+    marginTop: -WATERMARK / 2,
+    opacity: 0.035,
+  },
+  // `.splash { inset: 0; display: grid; place-items: center }`
+  splash: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colour.background,
+  },
+  splashLogo: {
+    width: SPLASH_LOGO,
+    height: SPLASH_LOGO,
+  },
+} satisfies Record<string, Style>;

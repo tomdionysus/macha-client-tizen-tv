@@ -1,232 +1,194 @@
-import { useEffect } from 'react';
-import { SamsungDpadInput, type SamsungDpadCommand, type SamsungDpadDirection } from '../platform/SamsungDpadInput';
-import { buildPlatformTraits } from '../platform/traits';
-
-const SELECTOR = '[data-tv-focusable="true"]:not([disabled])';
-const SELECTED_ATTRIBUTE = 'data-tv-selected';
-const DEFAULT_FOCUS_ATTRIBUTE = 'data-tv-default-focus';
-
-function isRangeInput(value: unknown): boolean {
-  if (!value || typeof value !== 'object') return false;
-  const element = value as { tagName?: unknown; type?: unknown };
-  return typeof element.tagName === 'string'
-    && element.tagName.toUpperCase() === 'INPUT'
-    && element.type === 'range';
-}
-
-export function tvRangeOwnsDirection(value: unknown, direction: SamsungDpadDirection): boolean {
-  return isRangeInput(value) && (direction === 'left' || direction === 'right');
-}
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import { tvFocus, type FocusRect, type TvDirection } from './tvFocus';
+import { SamsungDpadInput, samsungDpadCommand } from '../platform/SamsungDpadInput';
+import { samsungMediaCommand } from '../platform/SamsungMediaKeys';
+import { selectRelease } from './selectRelease';
+import { backHandler } from './backHandler';
 
 /**
- * Whether a focused editor keeps this command. Editors own the caret keys and Enter, but never up
- * and down, multi-line editors included: on a D-pad those are the only way between controls, and
- * an editor that kept them could only be left with Back.
+ * The Samsung remote in the Android TV client's command vocabulary. The
+ * D-pad and Return arrive as key events (`SamsungDpadInput`); the transport
+ * keys as the media key names and codes Tizen uses (`SamsungMediaKeys`),
+ * registered with the set at start.
  */
-export function tvTextEditingOwnsCommand(value: unknown, command: SamsungDpadCommand): boolean {
-  if (!isTextEditingElement(value)) return false;
-  return command !== 'up' && command !== 'down';
+export interface TvNavigationOptions {
+  /** Return true when Back was consumed; false lets the press go unanswered. */
+  onBack?: () => boolean;
+  /** `play` and `pause` are the remote's own keys; without an intent the key toggles. */
+  onPlayPause?: (intent?: 'play' | 'pause') => void;
+  onRewind?: () => void;
+  onFastForward?: () => void;
+  onStop?: () => void;
+  /** The remote's own next / previous keys. */
+  onNext?: () => void;
+  onPrevious?: () => void;
 }
 
+/** A text field has the caret keys and OK while it is focused; see `TvTextInput`. */
 export function isTextEditingElement(value: unknown): boolean {
   if (!value || typeof value !== 'object') return false;
-  const element = value as {
-    tagName?: unknown;
-    type?: unknown;
-    isContentEditable?: unknown;
-    getAttribute?: (name: string) => string | null;
-  };
+  const element = value as { tagName?: unknown };
   const tagName = typeof element.tagName === 'string' ? element.tagName.toUpperCase() : '';
-  return (tagName === 'INPUT' && !isRangeInput(element))
-    || tagName === 'TEXTAREA'
-    || tagName === 'SELECT'
-    || element.isContentEditable === true
-    || element.getAttribute?.('role') === 'textbox';
+  return tagName === 'INPUT' || tagName === 'TEXTAREA';
 }
 
-function tvVisible(element: HTMLElement): boolean {
-  const chrome = element.closest('.player-chrome');
-  if (chrome && !chrome.classList.contains('visible')) return false;
-  const rect = element.getBoundingClientRect();
-  return rect.width > 0 && rect.height > 0;
-}
+/** Attach the remote to the focus registry. Mount once, at the app root. */
+export function useTvNavigation(options: TvNavigationOptions = {}): void {
+  const latest = useRef(options);
+  latest.current = options;
 
-function tvElements(): HTMLElement[] {
-  const fullPlayer = document.querySelector<HTMLElement>('.player-presentation-full');
-  const scope = fullPlayer?.querySelector<HTMLElement>('.player-chrome.visible') ?? document;
-  return Array.from(scope.querySelectorAll<HTMLElement>(SELECTOR)).filter(tvVisible);
-}
-
-function markTvSelected(element: HTMLElement | undefined, elements: HTMLElement[]): void {
-  for (const candidate of elements) candidate.removeAttribute(SELECTED_ATTRIBUTE);
-  if (!element) return;
-  element.setAttribute(SELECTED_ATTRIBUTE, 'true');
-  if (document.activeElement !== element) element.focus();
-}
-
-function rectGap(start: number, size: number, otherStart: number, otherSize: number): number {
-  const end = start + size;
-  const otherEnd = otherStart + otherSize;
-  if (otherEnd < start) return start - otherEnd;
-  if (otherStart > end) return otherStart - end;
-  return 0;
-}
-
-/**
- * How far a candidate is in the direction pressed, or null when it is not in that direction.
- * Judged from the current element's edges, not its centre: by centres, cards below a wide search
- * field would count as "right" of it and beat the control beside it.
- */
-function scoreTvCandidate(current: DOMRect, candidate: DOMRect, direction: SamsungDpadDirection): { score: number; inLane: boolean } | null {
-  const tx = candidate.left + candidate.width / 2;
-  const ty = candidate.top + candidate.height / 2;
-
-  if (direction === 'left' && tx >= current.left) return null;
-  if (direction === 'right' && tx <= current.left + current.width) return null;
-  if (direction === 'up' && ty >= current.top) return null;
-  if (direction === 'down' && ty <= current.top + current.height) return null;
-
-  const horizontal = direction === 'left' || direction === 'right';
-  const primary = horizontal
-    ? rectGap(current.left, current.width, candidate.left, candidate.width)
-    : rectGap(current.top, current.height, candidate.top, candidate.height);
-  const secondary = horizontal
-    ? Math.abs(ty - (current.top + current.height / 2))
-    : Math.abs(tx - (current.left + current.width / 2));
-  const laneGap = horizontal
-    ? rectGap(current.top, current.height, candidate.top, candidate.height)
-    : rectGap(current.left, current.width, candidate.left, candidate.width);
-
-  return { score: primary + secondary * 0.2 + laneGap * 6, inLane: laneGap === 0 };
-}
-
-/**
- * Left and right keep to the current row and stop at its end. Up and down go to the nearest row,
- * not the same column first: under a short row, the only thing in a card's column can be the top
- * bar, and Up would skip the row between.
- */
-function bestTvCandidate(current: HTMLElement, elements: HTMLElement[], direction: SamsungDpadDirection): HTMLElement | undefined {
-  const currentRect = current.getBoundingClientRect();
-  const scored = elements
-    .filter((element) => element !== current)
-    .map((element) => {
-      const rect = element.getBoundingClientRect();
-      return { element, rect, result: scoreTvCandidate(currentRect, rect, direction) };
-    })
-    .filter((entry): entry is { element: HTMLElement; rect: DOMRect; result: { score: number; inLane: boolean } } => entry.result !== null);
-  if (scored.length === 0) return undefined;
-
-  let row = scored;
-  if (direction === 'left' || direction === 'right') {
-    // No fallback to other rows: Left from the top bar's first item would drop to a card below.
-    row = scored.filter((entry) => entry.result.inLane);
-  } else {
-    const facingGap = (rect: DOMRect) => rectGap(currentRect.top, currentRect.height, rect.top, rect.height);
-    const nearest = scored.reduce((best, entry) => (facingGap(entry.rect) < facingGap(best.rect) ? entry : best));
-    row = scored.filter((entry) => rectGap(nearest.rect.top, nearest.rect.height, entry.rect.top, entry.rect.height) === 0);
-  }
-  return [...row].sort((a, b) => a.result.score - b.result.score)[0]?.element;
-}
-
-function sequentialCandidate(elements: HTMLElement[], current: HTMLElement, direction: SamsungDpadDirection): HTMLElement | undefined {
-  const index = elements.indexOf(current);
-  if (index < 0) return elements[0];
-  const delta = direction === 'left' || direction === 'up' ? -1 : 1;
-  const next = index + delta;
-  return next >= 0 && next < elements.length ? elements[next] : undefined;
-}
-
-/** Plain DOM wiring, exported so it is testable outside a TV build mode. */
-export function attachSpatialTvNavigation(onBack?: () => boolean): () => void {
-  const focusFirst = () => {
-    const elements = tvElements();
-    if (elements.length === 0) return;
-    const active = document.activeElement instanceof HTMLElement && elements.indexOf(document.activeElement) >= 0
-      ? document.activeElement
-      : undefined;
-    const selected = elements.find((element) => element.getAttribute(SELECTED_ATTRIBUTE) === 'true');
-    const preferred = elements.find((element) => element.getAttribute(DEFAULT_FOCUS_ATTRIBUTE) === 'true');
-    markTvSelected(active ?? selected ?? preferred ?? elements[0], elements);
-  };
-
-  const focusDefault = () => {
-    const elements = tvElements();
-    if (elements.length === 0) return;
-    const preferred = elements.find((element) => element.getAttribute(DEFAULT_FOCUS_ATTRIBUTE) === 'true') ?? elements[0];
-    markTvSelected(preferred, elements);
-  };
-
-  const onFocusIn = (event: FocusEvent) => {
-    const target = event.target;
-    if (!(target instanceof HTMLElement) || !target.matches(SELECTOR) || !tvVisible(target)) return;
-    markTvSelected(target, tvElements());
-  };
-
-  const onCommand = (command: SamsungDpadCommand): boolean => {
-    if (command !== 'back' && tvTextEditingOwnsCommand(document.activeElement, command)) return false;
-
-    const elements = tvElements();
-    if (elements.length === 0) return false;
-
-    const active = document.activeElement instanceof HTMLElement && elements.indexOf(document.activeElement) >= 0
-      ? document.activeElement
-      : undefined;
-    const selected = elements.find((element) => element.getAttribute(SELECTED_ATTRIBUTE) === 'true');
-    const preferred = elements.find((element) => element.getAttribute(DEFAULT_FOCUS_ATTRIBUTE) === 'true');
-    const current = active ?? selected ?? preferred ?? elements[0];
-
-    if (command === 'back') return onBack?.() ?? false;
-
-    if (command === 'activate') {
-      markTvSelected(current, elements);
-      current.click();
-      return true;
-    }
-
-    if (tvRangeOwnsDirection(current, command)) {
-      return false;
-    }
-
-    const currentRect = current.getBoundingClientRect();
-    const geometryValid = currentRect.width > 0 && currentRect.height > 0;
-    let next: HTMLElement | undefined;
-    if (geometryValid) {
-      next = bestTvCandidate(current, elements, command);
-    } else {
-      next = sequentialCandidate(elements, current, command);
-    }
-    if (!next) return false;
-
-    markTvSelected(next, elements);
-    next.scrollIntoView(false);
-    return true;
-  };
-
-  const input = new SamsungDpadInput(onCommand);
-  input.attach(document);
-  document.addEventListener('focusin', onFocusIn, true);
-  window.addEventListener('hashchange', focusFirst);
-  window.addEventListener('macha:tv-focus-default', focusDefault);
-  focusFirst();
-  const timer = window.setTimeout(focusFirst, 0);
-
-  return () => {
-    window.clearTimeout(timer);
-    input.detach();
-    document.removeEventListener('focusin', onFocusIn, true);
-    window.removeEventListener('hashchange', focusFirst);
-    window.removeEventListener('macha:tv-focus-default', focusDefault);
-  };
-}
-
-export function requestTvDefaultFocus(): void {
-  if (!buildPlatformTraits.usesDpadNavigation) return;
-  window.setTimeout(() => window.dispatchEvent(new Event('macha:tv-focus-default')), 0);
-}
-
-export function useTvNavigation(onBack?: () => boolean): void {
   useEffect(() => {
-    if (!buildPlatformTraits.usesDpadNavigation) return undefined;
-    return attachSpatialTvNavigation(onBack);
-  }, [onBack]);
+    const input = new SamsungDpadInput((command) => {
+      selectRelease.pressed();
+      const editor = document.activeElement;
+
+      if (isTextEditingElement(editor)) {
+        // The field keeps the caret keys and OK. Back closes it, and Up or
+        // Down leave it for the D-pad: on a remote those are the only way
+        // between controls, and a field that kept them could only be left
+        // with Back. Blurring releases the field's suspension (`TvTextInput`).
+        if (command === 'left' || command === 'right' || command === 'activate') return false;
+        (editor as HTMLElement).blur();
+        if (command === 'back') return true;
+      } else if (tvFocus.suspended) {
+        // A suspension whose field has gone would disable the remote for
+        // good; with no field focused it is stale and is dropped.
+        tvFocus.resumeAll();
+      }
+
+      if (command === 'back') return backHandler.handle();
+      return tvFocus.handle(command);
+    });
+    input.attach(document);
+
+    // D-pad centre hands over to a text field on key-up: see `selectRelease`.
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (samsungDpadCommand(event.key, event.keyCode) === 'activate') selectRelease.released();
+    };
+
+    const onMediaKey = (event: KeyboardEvent) => {
+      const command = samsungMediaCommand(event.key, event.keyCode);
+      if (!command) return;
+      if (isTextEditingElement(document.activeElement)) return;
+      const handlers = latest.current;
+      switch (command) {
+        case 'play':
+          handlers.onPlayPause?.('play');
+          break;
+        case 'pause':
+          handlers.onPlayPause?.('pause');
+          break;
+        case 'toggle':
+          handlers.onPlayPause?.();
+          break;
+        case 'rewind':
+          handlers.onRewind?.();
+          break;
+        case 'fast-forward':
+          handlers.onFastForward?.();
+          break;
+        case 'stop':
+          handlers.onStop?.();
+          break;
+        case 'next':
+          handlers.onNext?.();
+          break;
+        case 'previous':
+          handlers.onPrevious?.();
+          break;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+    };
+
+    document.addEventListener('keyup', onKeyUp, true);
+    document.addEventListener('keydown', onMediaKey, true);
+    return () => {
+      input.detach();
+      document.removeEventListener('keyup', onKeyUp, true);
+      document.removeEventListener('keydown', onMediaKey, true);
+    };
+  }, []);
+
+  // The root's Back listener, registered first so every screen's answers before it.
+  useEffect(() => {
+    const subscription = backHandler.addListener(() => latest.current.onBack?.() ?? false);
+    return () => subscription.remove();
+  }, []);
+}
+
+export interface UseFocusableOptions {
+  /**
+   * A stable id, for moving focus here by name (the alphabet strip's jump).
+   * Defaults to React's generated id.
+   */
+  id?: string;
+  /** Called on D-pad centre. */
+  onSelect?: () => void;
+  disabled?: boolean;
+  /** Receives focus when its scope becomes active. */
+  defaultFocus?: boolean;
+  scope?: string;
+  /** Keep these directions instead of moving focus. See `Focusable.ownsDirection`. */
+  ownsDirection?: (direction: TvDirection) => boolean;
+  onDirection?: (direction: TvDirection) => void;
+  /** A side rail, reachable sideways from any row. See `Focusable.rail` in `tvFocus.ts`. */
+  rail?: boolean;
+}
+
+export interface UseFocusableResult {
+  focused: boolean;
+  ref: React.RefObject<HTMLDivElement | null>;
+}
+
+/**
+ * Register one focusable. Its rectangle is read from the DOM at each press
+ * (`Focusable.measure`), so there is nothing to measure ahead and nothing to
+ * correct for scrolling: every element is compared where it is drawn now.
+ */
+export function useFocusable(options: UseFocusableOptions = {}): UseFocusableResult {
+  const generated = useId();
+  const id = options.id ?? generated;
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [focused, setFocused] = useState(false);
+  const latest = useRef(options);
+  latest.current = options;
+
+  useLayoutEffect(() => {
+    return tvFocus.register({
+      id,
+      disabled: latest.current.disabled,
+      defaultFocus: options.defaultFocus,
+      scope: options.scope,
+      activate: () => latest.current.onSelect?.(),
+      onFocusChange: setFocused,
+      ownsDirection: (direction) => latest.current.ownsDirection?.(direction) ?? false,
+      onDirection: (direction) => latest.current.onDirection?.(direction),
+      rail: options.rail,
+      measure: (): FocusRect | undefined => {
+        const element = ref.current;
+        if (!element) return undefined;
+        const rect = element.getBoundingClientRect();
+        return { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+      },
+    });
+  }, [id, options.defaultFocus, options.scope, options.rail]);
+
+  // `disabled` is patched in place rather than re-registered, which would
+  // reorder the sequential fallback. A selected element that becomes disabled
+  // yields to the default.
+  const firstDisabled = useRef(true);
+  useLayoutEffect(() => {
+    if (firstDisabled.current) {
+      firstDisabled.current = false;
+      return;
+    }
+    tvFocus.update(id, { disabled: options.disabled });
+    if (options.disabled && tvFocus.selected() === id) {
+      tvFocus.select(undefined);
+      tvFocus.focusDefault();
+    }
+  }, [id, options.disabled]);
+
+  return { focused, ref };
 }

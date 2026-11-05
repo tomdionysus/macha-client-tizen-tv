@@ -1,0 +1,610 @@
+import { beforeEach, describe, expect, it } from 'vitest';
+import { pickTvCandidate, scoreTvCandidate, tvFocus, type FocusRect } from './tvFocus';
+
+function rect(left: number, top: number, width = 50, height = 50): FocusRect {
+  return { left, top, width, height };
+}
+
+/** The scorer ports the web client's `scoreTvCandidate`: if its weights change there, these should fail. */
+describe('spatial focus scoring', () => {
+  it('rejects candidates behind the direction of travel', () => {
+    const current = rect(100, 100);
+    expect(scoreTvCandidate(current, rect(100, 0), 'down')).toBeNull();
+    expect(scoreTvCandidate(current, rect(100, 200), 'up')).toBeNull();
+    expect(scoreTvCandidate(current, rect(0, 100), 'right')).toBeNull();
+    expect(scoreTvCandidate(current, rect(200, 100), 'left')).toBeNull();
+  });
+
+  it('rejects a candidate exactly on top of the current element', () => {
+    const current = rect(100, 100);
+    for (const direction of ['up', 'down', 'left', 'right'] as const) {
+      expect(scoreTvCandidate(current, current, direction)).toBeNull();
+    }
+  });
+
+  it('prefers the nearer of two candidates in the same lane', () => {
+    const current = rect(0, 0);
+    const near = scoreTvCandidate(current, rect(0, 100), 'down');
+    const far = scoreTvCandidate(current, rect(0, 300), 'down');
+    expect(near).not.toBeNull();
+    expect(far).not.toBeNull();
+    expect(near!).toBeLessThan(far!);
+  });
+
+  it('penalises leaving the current lane six-fold', () => {
+    const current = rect(0, 0);
+    const sameLaneFurther = scoreTvCandidate(current, rect(0, 140), 'down');
+    const otherLaneNearer = scoreTvCandidate(current, rect(400, 100), 'down');
+    expect(sameLaneFurther!).toBeLessThan(otherLaneNearer!);
+  });
+
+  it('discounts cross-axis drift to a fifth of primary distance', () => {
+    const current = rect(0, 0);
+    // Both are 100 below and in the lane, so only the secondary term separates them.
+    const aligned = scoreTvCandidate(current, rect(0, 100), 'down')!;
+    const drifted = scoreTvCandidate(current, rect(40, 100), 'down')!;
+    expect(drifted - aligned).toBeCloseTo(40 * 0.2, 5);
+  });
+
+  it('scores horizontally using the same rules on the other axis', () => {
+    const current = rect(0, 0);
+    const near = scoreTvCandidate(current, rect(100, 0), 'right')!;
+    const far = scoreTvCandidate(current, rect(300, 0), 'right')!;
+    expect(near).toBeLessThan(far);
+  });
+});
+
+describe('suspension', () => {
+  beforeEach(() => {
+    // The registry is a module singleton: a leaked suspension would make every
+    // later test pass by doing nothing.
+    while (tvFocus.suspended) tvFocus.suspend()();
+  });
+
+  it('is not suspended by default', () => {
+    expect(tvFocus.suspended).toBe(false);
+  });
+
+  it('reports suspension while a token is held', () => {
+    const resume = tvFocus.suspend();
+    expect(tvFocus.suspended).toBe(true);
+    resume();
+    expect(tvFocus.suspended).toBe(false);
+  });
+
+  it('refuses every command while suspended, so the platform gets the key', () => {
+    const resume = tvFocus.suspend();
+    expect(tvFocus.handle('down')).toBe(false);
+    expect(tvFocus.handle('activate')).toBe(false);
+    resume();
+  });
+
+  it('does not even notify command observers, which would wake player chrome', () => {
+    const seen: string[] = [];
+    const stop = tvFocus.onCommand((command) => seen.push(command));
+    const resume = tvFocus.suspend();
+    tvFocus.handle('down');
+    expect(seen).toEqual([]);
+    resume();
+    tvFocus.handle('down');
+    expect(seen).toEqual(['down']);
+    stop();
+  });
+
+  it('nests, so a menu over a search field resumes independently', () => {
+    const outer = tvFocus.suspend();
+    const inner = tvFocus.suspend();
+    inner();
+    expect(tvFocus.suspended).toBe(true);
+    outer();
+    expect(tvFocus.suspended).toBe(false);
+  });
+
+  it('recovers from a suspension whose holder went away', () => {
+    // Android TV keeps a ReactEditText focused after the IME closes, so
+    // `onBlur` may never fire and a token can be lost.
+    tvFocus.suspend();
+    tvFocus.suspend();
+    expect(tvFocus.suspended).toBe(true);
+
+    tvFocus.resumeAll();
+
+    expect(tvFocus.suspended).toBe(false);
+  });
+
+  it('is idempotent per token, so a double resume cannot lift another suspension', () => {
+    const first = tvFocus.suspend();
+    const second = tvFocus.suspend();
+    first();
+    first();
+    expect(tvFocus.suspended).toBe(true);
+    second();
+    expect(tvFocus.suspended).toBe(false);
+  });
+
+  it('leaves selection alone, unlike a scope', () => {
+    const stop = tvFocus.register({ id: 'a', activate: () => undefined });
+    tvFocus.select('a');
+    const resume = tvFocus.suspend();
+    resume();
+    expect(tvFocus.selected()).toBe('a');
+    stop();
+  });
+});
+
+/** On the device, focusables are routinely measured before they register. */
+describe('geometry arriving out of order', () => {
+  beforeEach(() => {
+    while (tvFocus.suspended) tvFocus.suspend()();
+  });
+
+  it('keeps a rectangle that arrives before registration', () => {
+    tvFocus.measure('early', { left: 10, top: 20, width: 100, height: 50 });
+    const stop = tvFocus.register({ id: 'early' });
+    expect(tvFocus.debugGeometry()).toContain('measured=1');
+    stop();
+  });
+
+  it('keeps geometry across a re-registration', () => {
+    const stop = tvFocus.register({ id: 'again' });
+    tvFocus.measure('again', { left: 0, top: 0, width: 10, height: 10 });
+    const stopAgain = tvFocus.register({ id: 'again', disabled: false });
+    expect(tvFocus.debugGeometry()).toContain('measured=1');
+    stopAgain();
+    stop();
+  });
+
+  it('keeps geometry when an element is disabled and enabled again in place', () => {
+    // `useFocusable` patches `disabled` through `update`, because a
+    // re-registration loses the rectangle. This is the contract it relies on.
+    const card = tvFocus.register({ id: 'toggle-card' });
+    const button = tvFocus.register({ id: 'toggle-button', disabled: true });
+    tvFocus.measure('toggle-card', { left: 0, top: 0, width: 100, height: 100 });
+    tvFocus.measure('toggle-button', { left: 200, top: 0, width: 50, height: 50 });
+
+    tvFocus.select('toggle-card');
+    expect(tvFocus.handle('right')).toBe(false);
+
+    tvFocus.update('toggle-button', { disabled: false });
+    expect(tvFocus.handle('right')).toBe(true);
+    expect(tvFocus.selected()).toBe('toggle-button');
+    // Moving back needs the button's own rectangle, which a re-registration loses.
+    expect(tvFocus.handle('left')).toBe(true);
+    expect(tvFocus.selected()).toBe('toggle-card');
+    card();
+    button();
+  });
+
+  it('forgets a held rectangle when the focusable never arrives', () => {
+    tvFocus.measure('ghost', { left: 0, top: 0, width: 10, height: 10 });
+    const stop = tvFocus.register({ id: 'ghost' });
+    stop();
+    // Re-registering must not resurrect geometry from a previous mount.
+    const again = tvFocus.register({ id: 'ghost' });
+    expect(tvFocus.debugGeometry()).toContain('measured=0');
+    again();
+  });
+
+  it('scores by geometry rather than registration order once measured', () => {
+    // Registered right-to-left, laid out left-to-right.
+    const right = tvFocus.register({ id: 'right' });
+    const left = tvFocus.register({ id: 'left' });
+    tvFocus.measure('right', { left: 500, top: 0, width: 100, height: 100 });
+    tvFocus.measure('left', { left: 0, top: 0, width: 100, height: 100 });
+
+    tvFocus.select('left');
+    expect(tvFocus.handle('right')).toBe(true);
+    expect(tvFocus.selected()).toBe('right');
+
+    expect(tvFocus.handle('left')).toBe(true);
+    expect(tvFocus.selected()).toBe('left');
+    right();
+    left();
+  });
+
+  it('prefers the element below over the next one registered, for a down press', () => {
+    const navA = tvFocus.register({ id: 'nav-a' });
+    const navB = tvFocus.register({ id: 'nav-b' });
+    const card = tvFocus.register({ id: 'card' });
+    tvFocus.measure('nav-a', { left: 0, top: 0, width: 80, height: 40 });
+    tvFocus.measure('nav-b', { left: 100, top: 0, width: 80, height: 40 });
+    tvFocus.measure('card', { left: 0, top: 300, width: 150, height: 250 });
+
+    tvFocus.select('nav-a');
+    tvFocus.handle('down');
+    expect(tvFocus.selected()).toBe('card');
+    navA();
+    navB();
+    card();
+  });
+});
+
+/** On the DOM an element reads its own rectangle at the press, so a scrolled page needs no correcting. */
+describe('an element that measures itself', () => {
+  beforeEach(() => {
+    tvFocus.resumeAll();
+    tvFocus.select(undefined);
+  });
+
+  it('is scored where it is drawn at the press, not where it first was', () => {
+    let lowerTop = 500;
+    const upper = tvFocus.register({ id: 'upper', measure: () => rect(0, 100) });
+    const near = tvFocus.register({ id: 'near', measure: () => rect(0, lowerTop) });
+    const far = tvFocus.register({ id: 'far', measure: () => rect(0, 300) });
+    tvFocus.select('upper');
+
+    // Scrolled so `near` now stands above `far`.
+    lowerTop = 200;
+    tvFocus.handle('down');
+    expect(tvFocus.selected()).toBe('near');
+    upper();
+    near();
+    far();
+  });
+});
+
+/** `current()` is a fallback when `selectedId` names nothing reachable; the first press adopts it. */
+describe('the first press on a screen with no selection', () => {
+  /** Two focusables side by side, with geometry, in the default scope. */
+  function mountRow(): () => void {
+    const offs = [
+      tvFocus.register({ id: 'left-button', activate: () => undefined }),
+      tvFocus.register({ id: 'right-button', activate: () => undefined }),
+    ];
+    tvFocus.measure('left-button', rect(0, 100));
+    tvFocus.measure('right-button', rect(200, 100));
+    // `register` queues a default focus on a microtask; clear it.
+    tvFocus.select(undefined);
+    return () => { for (const off of offs) off(); };
+  }
+
+  beforeEach(() => {
+    while (tvFocus.suspended) tvFocus.suspend()();
+  });
+
+  it('reveals focus rather than doing nothing, even with no candidate that way', () => {
+    const stop = mountRow();
+    expect(tvFocus.selected()).toBeUndefined();
+
+    // Nothing is above either element.
+    expect(tvFocus.handle('up')).toBe(true);
+    expect(tvFocus.selected()).toBeDefined();
+
+    stop();
+  });
+
+  it('does not skip the first element when a candidate does exist', () => {
+    const stop = mountRow();
+    tvFocus.select(undefined);
+
+    tvFocus.handle('right');
+    expect(tvFocus.selected()).toBe('left-button');
+
+    stop();
+  });
+
+  it('moves normally once something is genuinely selected', () => {
+    const stop = mountRow();
+    tvFocus.select('left-button');
+
+    expect(tvFocus.handle('right')).toBe(true);
+    expect(tvFocus.selected()).toBe('right-button');
+
+    stop();
+  });
+});
+
+/** A card restored by name is selected while its grid is fetching, and registers later. */
+describe('an element that mounts into an existing selection', () => {
+  beforeEach(() => {
+    tvFocus.resumeAll();
+    tvFocus.select(undefined);
+  });
+
+  it('is told it is focused, because select fired before it existed', () => {
+    tvFocus.select('media:m1');
+
+    let focused: boolean | undefined;
+    const stop = tvFocus.register({ id: 'media:m1', onFocusChange: (value) => (focused = value) });
+
+    expect(focused).toBe(true);
+    stop();
+  });
+
+  it('leaves an element that is not the selected one alone', () => {
+    tvFocus.select('media:m1');
+
+    let focused: boolean | undefined;
+    const stop = tvFocus.register({ id: 'media:m2', onFocusChange: (value) => (focused = value) });
+
+    expect(focused).toBeUndefined();
+    stop();
+  });
+})
+
+/** A screen returned to re-fetches, so the restore is armed and registration claims it. */
+describe('a restore armed before its card exists', () => {
+  beforeEach(() => {
+    tvFocus.resumeAll();
+    tvFocus.select(undefined);
+    tvFocus.restoreWhenPresent(undefined);
+  });
+
+  it('is claimed by the card when it finally registers', () => {
+    tvFocus.restoreWhenPresent('media:m1');
+    tvFocus.focusDefault();
+
+    let focused: boolean | undefined;
+    const stop = tvFocus.register({ id: 'media:m1', onFocusChange: (value) => (focused = value) });
+
+    expect(tvFocus.selected()).toBe('media:m1');
+    expect(focused).toBe(true);
+    stop();
+  });
+
+  it('applies immediately when the card is already there', () => {
+    const stop = tvFocus.register({ id: 'media:m2' });
+    tvFocus.restoreWhenPresent('media:m2');
+    expect(tvFocus.selected()).toBe('media:m2');
+    stop();
+  });
+
+  it('is abandoned once the viewer presses a key, so focus is not yanked', () => {
+    const first = tvFocus.register({ id: 'a' });
+    tvFocus.select('a');
+    tvFocus.restoreWhenPresent('media:m3');
+
+    tvFocus.handle('down');
+
+    const late = tvFocus.register({ id: 'media:m3' });
+    expect(tvFocus.selected()).not.toBe('media:m3');
+    first();
+    late();
+  });
+})
+
+/** A screen's default card registers only after its fetch, when `focusDefault` has already fallen back. */
+describe('a default that registers after the screen has fallen back', () => {
+  beforeEach(() => {
+    tvFocus.resumeAll();
+    tvFocus.select(undefined);
+    tvFocus.restoreWhenPresent(undefined);
+  });
+
+  it('takes focus from the fallback the viewer never chose', () => {
+    const nav = tvFocus.register({ id: 'nav-home' });
+    tvFocus.focusDefault();
+    expect(tvFocus.selected()).toBe('nav-home');
+
+    const card = tvFocus.register({ id: 'season-1', defaultFocus: true });
+    expect(tvFocus.selected()).toBe('season-1');
+    nav();
+    card();
+  });
+
+  it('does not take focus the viewer moved themselves', () => {
+    const nav = tvFocus.register({ id: 'nav-home' });
+    const other = tvFocus.register({ id: 'nav-movies' });
+    tvFocus.focusDefault();
+    tvFocus.select('nav-movies');
+
+    const card = tvFocus.register({ id: 'season-1', defaultFocus: true });
+    expect(tvFocus.selected()).toBe('nav-movies');
+    nav();
+    other();
+    card();
+  });
+
+  it('does not take focus a default already holds', () => {
+    const first = tvFocus.register({ id: 'first', defaultFocus: true });
+    tvFocus.focusDefault();
+    const second = tvFocus.register({ id: 'second', defaultFocus: true });
+    expect(tvFocus.selected()).toBe('first');
+    first();
+    second();
+  });
+
+  it('gives way to a restore that is waiting for its card', () => {
+    const nav = tvFocus.register({ id: 'nav-home' });
+    tvFocus.focusDefault();
+    tvFocus.restoreWhenPresent('media:ep-3');
+
+    const card = tvFocus.register({ id: 'season-1', defaultFocus: true });
+    const restored = tvFocus.register({ id: 'media:ep-3' });
+    expect(tvFocus.selected()).toBe('media:ep-3');
+    nav();
+    card();
+    restored();
+  });
+});
+
+/**
+ * Search's control row, measured on the TCL set (1920-wide screenshot): a wide
+ * field, the sort control to its right, result cards below. Scoring from
+ * centres would put a card one row down nearer than the sort control.
+ */
+describe('a wide element beside smaller ones', () => {
+  const field = { id: 'field', rect: rect(58, 172, 1264, 46) };
+  const sort = { id: 'sort', rect: rect(1340, 172, 152, 46) };
+  const cards = [62, 290, 518, 746, 974, 1202, 1430, 1658].map((left, index) => ({
+    id: `card-${index}`,
+    rect: rect(left, 250, 200, 360),
+  }));
+
+  it('moves right along its own row, not down into the row below', () => {
+    expect(pickTvCandidate(field.rect, [sort, ...cards], 'right')?.id).toBe('sort');
+  });
+
+  it('prefers a far control on its own row to a near one on the next', () => {
+    const refresh = { id: 'refresh', rect: rect(1812, 172, 46, 46) };
+    expect(pickTvCandidate(field.rect, [refresh, ...cards], 'right')?.id).toBe('refresh');
+  });
+
+  it('still steps sideways along a row of cards', () => {
+    expect(pickTvCandidate(cards[1]!.rect, [field, sort, ...cards.filter((_, i) => i !== 1)], 'right')?.id).toBe(
+      'card-2',
+    );
+  });
+
+  it('still goes down from the field into the results', () => {
+    expect(pickTvCandidate(field.rect, [sort, ...cards], 'down')?.id).toMatch(/^card-/);
+  });
+});
+
+describe('reversing a move', () => {
+  beforeEach(() => {
+    tvFocus.resumeAll();
+    tvFocus.select(undefined);
+    tvFocus.restoreWhenPresent(undefined);
+  });
+
+  function place(id: string, r: FocusRect): () => void {
+    const stop = tvFocus.register({ id });
+    tvFocus.measure(id, r);
+    return stop;
+  }
+
+  // Search's row and results. The cards sit under the field's right end, so by
+  // geometry Up from them is the field.
+  const layout = (): (() => void)[] => [
+    place('field', rect(58, 172, 1264, 46)),
+    place('sort', rect(1340, 172, 152, 46)),
+    place('card-a', rect(872, 250, 200, 360)),
+    place('card-b', rect(1100, 250, 200, 360)),
+  ];
+
+  it('returns to the element it came from, where geometry would choose another', () => {
+    const stops = layout();
+    tvFocus.select('sort');
+    tvFocus.handle('down');
+    expect(tvFocus.selected()).toBe('card-b');
+    tvFocus.handle('up');
+    expect(tvFocus.selected()).toBe('sort');
+    stops.forEach((stop) => stop());
+  });
+
+  it('forgets once the viewer moves another way', () => {
+    const stops = layout();
+    tvFocus.select('sort');
+    tvFocus.handle('down');
+    tvFocus.handle('left');
+    expect(tvFocus.selected()).toBe('card-a');
+    tvFocus.handle('up');
+    expect(tvFocus.selected()).toBe('field');
+    stops.forEach((stop) => stop());
+  });
+});
+
+/**
+ * Home, measured on the TCL set: the top bar, a Continue Watching row of three
+ * cards at the left, and a full Movies row below.
+ */
+describe('moving between rows', () => {
+  const nav = [
+    { id: 'nav-home', rect: rect(740, 20, 60, 40) },
+    { id: 'nav-search', rect: rect(1040, 20, 70, 40) },
+  ];
+  const cw = [60, 290, 520].map((left, index) => ({ id: `cw-${index}`, rect: rect(left, 140, 200, 330) }));
+  const movies = [60, 290, 520, 745, 975].map((left, index) => ({
+    id: `movie-${index}`,
+    rect: rect(left, 640, 200, 320),
+  }));
+
+  it('goes up to the row above, not over it to the top bar', () => {
+    const lastMovie = movies[4]!;
+    expect(pickTvCandidate(lastMovie.rect,[...nav, ...cw, ...movies.slice(0, 4)], 'up')?.id).toBe('cw-2');
+  });
+
+  it('still reaches the top bar from the first row', () => {
+    expect(pickTvCandidate(cw[0]!.rect, [...nav, ...cw.slice(1), ...movies], 'up')?.id).toMatch(/^nav-/);
+  });
+});
+
+describe('the end of a row', () => {
+  const home = { id: 'nav-home', rect: rect(740, 20, 60, 40) };
+  const movies = { id: 'nav-movies', rect: rect(820, 20, 80, 40) };
+  const arrival = { id: 'cw-0', rect: rect(60, 140, 200, 330) };
+
+  it('stops a sideways move rather than dropping into another row', () => {
+    expect(pickTvCandidate(home.rect, [movies, arrival], 'left')).toBeUndefined();
+  });
+
+  it('still moves along the row it is in', () => {
+    expect(pickTvCandidate(movies.rect, [home, arrival], 'left')?.id).toBe('nav-home');
+  });
+});
+
+describe('the fallback remembers the last nav item used', () => {
+  beforeEach(() => {
+    tvFocus.resumeAll();
+    tvFocus.select(undefined);
+    tvFocus.restoreWhenPresent(undefined);
+  });
+
+  it('falls back to the nav item the viewer last chose, not the first on screen', () => {
+    const home = tvFocus.register({ id: 'nav:home' });
+    const movies = tvFocus.register({ id: 'nav:movies' });
+    tvFocus.select('nav:movies');
+    tvFocus.select(undefined);
+
+    tvFocus.focusDefault();
+    expect(tvFocus.selected()).toBe('nav:movies');
+    home();
+    movies();
+  });
+
+  it('does not remember a nav item the fallback chose on its own', () => {
+    const home = tvFocus.register({ id: 'nav:home' });
+    const settings = tvFocus.register({ id: 'nav:settings' });
+    tvFocus.select('nav:settings');
+    const settingsGone = settings;
+    settingsGone();
+    tvFocus.focusDefault();
+    expect(tvFocus.selected()).toBe('nav:home');
+
+    const back = tvFocus.register({ id: 'nav:settings' });
+    tvFocus.select(undefined);
+    tvFocus.focusDefault();
+    expect(tvFocus.selected()).toBe('nav:settings');
+    home();
+    back();
+  });
+
+  it('still lets a screen default that registers later take over', () => {
+    const movies = tvFocus.register({ id: 'nav:movies' });
+    tvFocus.select('nav:movies');
+    tvFocus.select(undefined);
+    tvFocus.focusDefault();
+    const card = tvFocus.register({ id: 'season-1', defaultFocus: true });
+    expect(tvFocus.selected()).toBe('season-1');
+    movies();
+    card();
+  });
+});
+
+/**
+ * The alphabet strip beside a grid: shorter than the grid, so the bottom row
+ * sits below its last key. Geometry as on the TCL set's 960x540 dp viewport.
+ */
+describe('a side rail beside a grid', () => {
+  const keys = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').map((key, index) => ({
+    id: `alphabet:${key}`,
+    rect: rect(940, 160 + index * 10.5, 14, 10),
+    rail: true,
+  }));
+  const lastCard = { id: 'card-last', rect: rect(720, 470, 100, 150) };
+  const lower = { id: 'card-lower', rect: rect(520, 470, 100, 150) };
+
+  it('is reached by Right from a row below its last key, at the nearest key', () => {
+    expect(pickTvCandidate(lastCard.rect, keys, 'right')?.id).toBe('alphabet:Z');
+  });
+
+  it('still loses to a control on the same row', () => {
+    expect(pickTvCandidate(lower.rect, [lastCard, ...keys], 'right')?.id).toBe('card-last');
+  });
+
+  it('does not let an ordinary control in another row be reached sideways', () => {
+    const below = { id: 'below', rect: rect(900, 700, 100, 150) };
+    expect(pickTvCandidate(lastCard.rect, [below], 'right')).toBeUndefined();
+  });
+});
