@@ -151,7 +151,7 @@ export function SearchScreen({
           <SortControl sorts={SEARCH_SORTS} value={sort} onChange={setSort} height={controlRow.height} style={styles.barItem} />
           <View style={styles.barItem}>
             <CategoryToggles
-              categories={SEARCH_CATEGORIES}
+              categories={TV_SEARCH_CATEGORIES}
               selected={categories}
               onChange={setCategories}
               height={controlRow.height}
@@ -204,6 +204,9 @@ export function SearchScreen({
     </View>
   );
 }
+
+/** What Search offers: core's defaults, which leave out books. Books are not on the television (Tom, 2026-11-05). */
+export const TV_SEARCH_CATEGORIES = SEARCH_CATEGORIES.filter((category) => DEFAULT_SEARCH_CATEGORIES.includes(category.key));
 
 /** Settle before the node is asked. Asserted: the web client's figure, kept identical. */
 const SETTLE_MS = 180;

@@ -13,7 +13,7 @@ The web app snapshot is gone. `src/` is the Android TV client's source, file for
 - **Copied unchanged:** the platform-neutral logic and its tests (`app/`, `text/viewerText.ts`, `hooks/tvFocus.ts` with a self-measuring `measure`, and the rest).
 - **Ported line for line:** every screen and component, on `components/primitives.tsx` in place of React Native's `View`, `Text`, `ScrollView` and `Image`.
 - **Different by necessity:** `platform/TizenPlatform.ts` and `player/TizenVideoPlayer.ts` in place of ExoPlayer: one media element, native HLS, MPEG-TS, no standby. Storage is `localStorage`. There is no volume: the television owns it.
-- **Dropped:** books, import, manage, identify, hls.js and react-router. The Android TV client has none of them. Tom has not been asked directly whether that suits the Samsung.
+- **Dropped:** books, import, manage, identify, hls.js and react-router. Tom, 2026-11-05: books, import and manage are not on the TV. Identify went with manage. Search offers no Books category.
 
 ## Measured on the set, 2026-11-05
 
@@ -22,7 +22,7 @@ QE55Q6FAM at 10.44.1.183:26101, platform 3.0.
 - The first build installed and reached the sign-in screen, styled by inspection of its geometry. Load event at 18.6 s with the inspector attached, against about 68 s before. DOM ready at 0.76 s. A clean launch has not been timed. The screen stays black until the bundle has run; nothing is drawn meanwhile.
 - `tizen.tvinputdevice` answered `SecurityError` on that build, so the transport keys did nothing. `config.xml` now asks for `tv.inputdevice`; not yet installed or seen working.
 - The panel is 3840x2160 (Tom confirmed). The application surface is 1920x1080 at ratio 1, and `screen`, `tizen.systeminfo` and the loaded `webapis` cannot report the panel, so automatic play stays uncapped.
-- Tom saw letterboxing that looked wrong. One title's frame was 1920x958, which leaves about 61 px top and bottom by `contain`; another's was 1920x1080, which leaves none. The magenta test on the set has no answer yet.
+- Tom saw letterboxing that looked wrong. One title's frame was 1920x958, which leaves about 61 px top and bottom by `contain`; another's was 1920x1080, which leaves none. Tom checked the screen against those figures on 2026-11-05: the letterboxing is correct, and nothing needs changing.
 - With the on-screen keyboard up the page height is 604, not 1080.
 - Tom started a title on that build: the element ran natively at `readyState` 4, advancing, no error, reporting 640x360. Tom thinks 640x360 is the source; not checked further.
 - Tom's first reports: a dark square round the logo, and missing posters. The square was the opaque PNG, now the SVG. Continue Watching's posters were signed URLs saved weeks ago: both answered 401 on the set, and the other URLs need a header an `<img>` cannot send. `LazyArtwork` now falls back to core's authenticated fetch. Both fixes are installed: the inspector reads no broken images, the two old posters loading as blobs, and the logo as the SVG. Tom confirmed the logo on 2026-11-05 and called the build much better than the previous Tizen version; he has not confirmed the posters. One Movies card draws its letter placeholder; whether that title has artwork has not been checked.

@@ -52,6 +52,7 @@ const CATEGORY_LABELS: Record<SearchCategoryKey, string> = {
   movies: 'Movies',
   shows: 'TV Shows',
   music: 'Music',
+  // Core's key, so the record must name it; Search never offers it here.
   books: 'Books',
 };
 
